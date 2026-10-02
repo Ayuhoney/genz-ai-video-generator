@@ -5,9 +5,10 @@ __pycache__
 .env
 .env.*
 !.env.example
-media
-media-test
-output
+# Storage dirs only — do NOT ignore app/media Python package
+/media
+/media-test
+/output
 tests
 scripts
 *.md

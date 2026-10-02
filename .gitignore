@@ -24,10 +24,12 @@ dist/
 frontend/dist/
 backend/.venv/
 
-# Media / studio output
-media/
+# Media storage / studio output (NOT the Python package app/media/)
+/backend/media/
+/backend/media-test/
+/backend/output/
 media-test/
-output/
+/output/
 *.mp4
 *.webm
 *.wav
