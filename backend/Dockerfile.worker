@@ -1,0 +1,27 @@
+# Celery worker + FFmpeg (VPS). Isolated from other Hostinger apps.
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --home /app --shell /usr/sbin/nologin app \
+    && mkdir -p /data/media \
+    && chown -R app:app /data/media
+
+COPY requirements.txt .
+RUN pip install --upgrade pip \
+    && pip install -r requirements.txt
+
+COPY app ./app
+RUN chown -R app:app /app
+
+USER app
+
+CMD ["sh", "-c", "celery -A app.workers.celery_app.celery_app worker --loglevel=${CELERY_LOGLEVEL:-INFO} -Q media,audio,ffmpeg,celery --concurrency=${CELERY_CONCURRENCY:-2}"]

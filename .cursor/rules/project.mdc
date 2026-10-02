@@ -1,0 +1,14 @@
+---
+description: Permanent project rules for ai-video-platform monorepo
+alwaysApply: true
+---
+
+# ai-video-platform — Project Rules
+
+- Build only the step I ask for. Never implement future steps.
+- Never hardcode secrets, DB URLs or API keys. Use `.env` and provide `.env.example`.
+- Never store video/audio/image files in MongoDB. MongoDB is for metadata/state only.
+- Frontend: React + TypeScript (strict) + Vite. Backend: Python 3.11+, FastAPI.
+- Keep API contracts stable; if a change is required, update frontend types too.
+- After every task: run build/lint/tests and fix all errors before finishing.
+- Prefer small reusable modules, typed code, no dead code.

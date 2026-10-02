@@ -1,0 +1,367 @@
+"""Generate via provider registry, upload to storage, record asset metadata."""
+
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from bson import ObjectId
+
+from app.providers.base import (
+    BudgetExceededError,
+    ImageRequest,
+    MusicRequest,
+    ProviderResult,
+    SFXRequest,
+    TTSRequest,
+    VideoRequest,
+)
+from app.providers.registry import get_registry
+from app.storage import build_r2_key, get_storage
+from app.storage.asset_store import (
+    create_asset,
+    get_sync_db_from_settings,
+    list_assets_for_project,
+    sum_cost_for_project,
+)
+from app.media.ffprobe import probe_duration_seconds, suffix_for_mime
+from app.providers.sarvam.audio import language_to_sarvam_code
+from app.workers import job_store
+from app.workers.project_context import (
+    build_music_prompt,
+    build_sfx_prompt,
+    get_project_doc,
+    scene_script_from_graph,
+)
+
+AssetKind = Literal[
+    "image",
+    "video",
+    "tts",
+    "sfx",
+    "music",
+    "ffmpeg",
+    "scene_render",
+    "final_assembly",
+]
+
+
+def _settings():
+    try:
+        from app.core.config import get_settings
+
+        return get_settings()
+    except Exception:
+        from app.workers.settings import get_worker_settings
+
+        return get_worker_settings()
+
+
+def set_project_paused_budget(db: Any, project_id: str) -> None:
+    """Mark project status paused_budget (sync Mongo)."""
+    now_filter: list[dict[str, Any]] = [{"_id": project_id}]
+    if ObjectId.is_valid(project_id):
+        now_filter.append({"_id": ObjectId(project_id)})
+    db.projects.update_one(
+        {"$or": now_filter},
+        {"$set": {"status": "paused_budget"}},
+    )
+
+
+def enforce_budget(project_id: str) -> None:
+    settings = _settings()
+    limit = float(settings.max_project_cost_usd or 0.0)
+    if limit <= 0:
+        return
+    db = get_sync_db_from_settings()
+    spent = sum_cost_for_project(db, project_id)
+    if spent >= limit:
+        set_project_paused_budget(db, project_id)
+        raise BudgetExceededError(project_id, spent, limit)
+
+
+def _record_and_upload(
+    *,
+    job: dict[str, Any],
+    result: ProviderResult,
+    asset_type: str,
+) -> dict[str, Any]:
+    enforce_budget(job["project_id"])
+    storage = get_storage()
+    db = get_sync_db_from_settings()
+    data = result.require_bytes()
+    if asset_type in {"tts", "sfx", "music"}:
+        probed = probe_duration_seconds(
+            data,
+            suffix=suffix_for_mime(result.mime_type),
+        )
+        if probed is not None:
+            result.duration_seconds = probed
+            result.metadata = {**result.metadata, "duration_ffprobe": probed}
+    filename = f"{job['id']}_{result.filename}"
+    key = build_r2_key(
+        project_id=job["project_id"],
+        scene_id=job.get("scene_id"),
+        shot_id=job.get("shot_id"),
+        asset_type=asset_type,
+        filename=filename,
+    )
+    storage.upload(key, data, content_type=result.mime_type)
+    asset = create_asset(
+        db,
+        project_id=job["project_id"],
+        scene_id=job.get("scene_id"),
+        shot_id=job.get("shot_id"),
+        asset_type=asset_type,
+        r2_key=key,
+        mime=result.mime_type,
+        size=len(data),
+        provider=result.provider_name,
+        cost=result.cost_usd,
+        duration=result.duration_seconds,
+        job_id=job["id"],
+        metadata=result.metadata,
+    )
+    job_store.update_job(
+        db,
+        job["id"],
+        cost=result.cost_usd,
+        asset_id=asset["id"],
+        r2_key=key,
+    )
+    # Re-check after recording cost
+    spent = sum_cost_for_project(db, job["project_id"])
+    limit = float(_settings().max_project_cost_usd or 0.0)
+    if limit > 0 and spent >= limit:
+        set_project_paused_budget(db, job["project_id"])
+
+    return {
+        "type": asset_type,
+        "output_key": key,
+        "r2_key": key,
+        "asset_id": asset["id"],
+        "mime": result.mime_type,
+        "size": len(data),
+        "provider": result.provider_name,
+        "cost": result.cost_usd,
+        "duration": result.duration_seconds,
+        "tmp_cleaned": True,
+    }
+
+
+def _scene_media_for_type(
+    project_id: str,
+    scene_id: str | None,
+    asset_type: str,
+) -> tuple[bytes | None, str | None, str | None]:
+    """Return (bytes, mime, http_url) for latest scene asset of a type."""
+    if not scene_id:
+        return None, None, None
+    db = get_sync_db_from_settings()
+    assets = list_assets_for_project(db, project_id)
+    matches = [
+        a
+        for a in assets
+        if a.get("type") == asset_type and a.get("scene_id") == scene_id
+    ]
+    if not matches:
+        return None, None, None
+    asset = matches[-1]
+    storage = get_storage()
+    data = storage.download(asset["r2_key"])
+    mime = str(asset.get("mime") or "application/octet-stream")
+    url: str | None = None
+    settings = _settings()
+    public = (getattr(settings, "r2_public_base_url", None) or "").rstrip("/")
+    if public:
+        url = f"{public}/{asset['r2_key']}"
+    else:
+        try:
+            signed = storage.presigned_url(asset["r2_key"], expires_in=3600)
+            if signed.startswith("http://") or signed.startswith("https://"):
+                url = signed
+        except Exception:
+            url = None
+    return data, mime, url
+
+
+def _scene_image_for_i2v(
+    project_id: str,
+    scene_id: str | None,
+) -> tuple[bytes | None, str | None, str | None]:
+    """Return (bytes, mime, public_or_presigned_url) for the scene still."""
+    return _scene_media_for_type(project_id, scene_id, "image")
+
+
+def produce_image(job: dict[str, Any]) -> dict[str, Any]:
+    enforce_budget(job["project_id"])
+    inp = job.get("input") or {}
+    scene_id = job.get("scene_id")
+    script = scene_script_from_graph(job["project_id"], scene_id)
+    prompt = str(
+        inp.get("prompt")
+        or script
+        or inp.get("kind")
+        or "cinematic film still, dramatic lighting, 16:9, no text"
+    )
+    result = get_registry().generate_image(
+        ImageRequest(
+            project_id=job["project_id"],
+            scene_id=scene_id,
+            prompt=prompt,
+            width=1280,
+            height=720,
+        )
+    )
+    return _record_and_upload(job=job, result=result, asset_type="image")
+
+
+def produce_video(job: dict[str, Any]) -> dict[str, Any]:
+    """Image-to-video: scene still → clip; duration matches shot length."""
+    enforce_budget(job["project_id"])
+    inp = job.get("input") or {}
+    duration = float(inp.get("duration_seconds") or 5)
+    image_bytes, image_mime, image_url = _scene_image_for_i2v(
+        job["project_id"],
+        job.get("scene_id"),
+    )
+    extra: dict[str, Any] = {}
+    settings = _settings()
+    res = getattr(settings, "fal_video_resolution", None)
+    if res:
+        extra["resolution"] = res
+    result = get_registry().generate_video(
+        VideoRequest(
+            project_id=job["project_id"],
+            scene_id=job.get("scene_id"),
+            shot_id=job.get("shot_id"),
+            prompt=str(inp.get("prompt") or job.get("shot_id") or "shot motion"),
+            duration_seconds=duration,
+            image_url=image_url,
+            image_bytes=image_bytes,
+            image_mime=image_mime,
+            extra=extra,
+        )
+    )
+    return _record_and_upload(job=job, result=result, asset_type="video")
+
+
+def _audio_context(job: dict[str, Any]) -> dict[str, Any]:
+    inp = job.get("input") or {}
+    project = get_project_doc(job["project_id"]) or {}
+    language = str(inp.get("language") or project.get("language") or "Hindi")
+    genre = str(inp.get("genre") or project.get("genre") or "Drama")
+    scene_id = job.get("scene_id")
+    script = str(
+        inp.get("script")
+        or inp.get("text")
+        or scene_script_from_graph(job["project_id"], scene_id)
+        or inp.get("scene_description")
+        or ""
+    ).strip()
+    scene_title = str(inp.get("scene_title") or scene_id or "Scene")
+    scene_description = str(inp.get("scene_description") or script)
+    duration = float(
+        inp.get("duration_seconds")
+        or inp.get("scene_duration_seconds")
+        or 10
+    )
+    return {
+        "language": language,
+        "language_code": language_to_sarvam_code(language),
+        "genre": genre,
+        "script": script,
+        "scene_title": scene_title,
+        "scene_description": scene_description,
+        "duration_seconds": duration,
+    }
+
+
+def produce_tts(job: dict[str, Any]) -> dict[str, Any]:
+    enforce_budget(job["project_id"])
+    ctx = _audio_context(job)
+    text = ctx["script"] or f"Narration for {job.get('scene_id') or 'scene'}."
+    result = get_registry().generate_tts(
+        TTSRequest(
+            project_id=job["project_id"],
+            scene_id=job.get("scene_id"),
+            text=text,
+            language=ctx["language"],
+            language_code=ctx["language_code"],
+        )
+    )
+    return _record_and_upload(job=job, result=result, asset_type="tts")
+
+
+def produce_sfx(job: dict[str, Any]) -> dict[str, Any]:
+    enforce_budget(job["project_id"])
+    ctx = _audio_context(job)
+    prompt = build_sfx_prompt(
+        genre=ctx["genre"],
+        scene_title=ctx["scene_title"],
+        scene_description=ctx["scene_description"],
+    )
+    video_bytes, video_mime, video_url = _scene_media_for_type(
+        job["project_id"],
+        job.get("scene_id"),
+        "video",
+    )
+    result = get_registry().generate_sfx(
+        SFXRequest(
+            project_id=job["project_id"],
+            scene_id=job.get("scene_id"),
+            prompt=prompt,
+            duration_seconds=min(30.0, max(0.5, ctx["duration_seconds"])),
+            genre=ctx["genre"],
+            loop=True,
+            video_url=video_url,
+            video_bytes=video_bytes,
+            video_mime=video_mime,
+        )
+    )
+    return _record_and_upload(job=job, result=result, asset_type="sfx")
+
+
+def produce_music(job: dict[str, Any]) -> dict[str, Any]:
+    enforce_budget(job["project_id"])
+    ctx = _audio_context(job)
+    prompt = build_music_prompt(
+        genre=ctx["genre"],
+        scene_title=ctx["scene_title"],
+        scene_description=ctx["scene_description"],
+    )
+    length_ms = int(min(600_000, max(3000, ctx["duration_seconds"] * 1000)))
+    result = get_registry().generate_music(
+        MusicRequest(
+            project_id=job["project_id"],
+            scene_id=job.get("scene_id"),
+            prompt=prompt,
+            duration_seconds=ctx["duration_seconds"],
+            music_length_ms=length_ms,
+            genre=ctx["genre"],
+            force_instrumental=True,
+        )
+    )
+    return _record_and_upload(job=job, result=result, asset_type="music")
+
+
+def produce_passthrough_media(
+    job: dict[str, Any],
+    *,
+    asset_type: AssetKind,
+    filename: str,
+    mime_type: str,
+    data: bytes,
+    cost_usd: float = 0.0,
+    duration: float | None = None,
+) -> dict[str, Any]:
+    """Upload non-provider worker outputs (ffmpeg / assembly) via the same storage path."""
+    result = ProviderResult(
+        data=data,
+        mime_type=mime_type,
+        filename=filename,
+        cost_usd=cost_usd,
+        provider_name="mock-pipeline",
+        duration_seconds=duration,
+        metadata={"pipeline": asset_type},
+    )
+    return _record_and_upload(job=job, result=result, asset_type=asset_type)
