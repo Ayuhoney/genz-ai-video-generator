@@ -17,7 +17,12 @@ from app.providers.fal.client import (
     extract_image_url,
     extract_video_url,
 )
-from app.providers.fal.clip_timing import clamp_clip_seconds, soft_visual_prompt, wan_frame_args
+from app.providers.fal.clip_timing import (
+    clamp_clip_seconds,
+    motion_only_prompt,
+    soft_visual_prompt,
+    wan_frame_args,
+)
 
 
 def _fal_settings() -> Any:
@@ -162,18 +167,30 @@ class FalVideoProvider(VideoProvider):
                 )
 
             arguments: dict[str, Any] = {
-                "prompt": soft_visual_prompt(
-                    request.prompt or "subtle cinematic camera motion"
-                ),
+                "prompt": motion_only_prompt(request.prompt),
                 "image_url": image_url,
             }
-            # WAN models expect num_frames/fps — plain "duration" is ignored / wrong.
             model_l = model.lower()
-            if "wan" in model_l:
+            # Turbo WAN uses resolution/aspect — NOT num_frames/fps (those trip errors).
+            if "wan" in model_l and "turbo" in model_l:
+                res = str(
+                    (request.extra or {}).get("resolution")
+                    or getattr(s, "fal_video_resolution", None)
+                    or "480p"
+                )
+                arguments["resolution"] = res
+                arguments["aspect_ratio"] = "auto"
+                arguments["enable_prompt_expansion"] = False
+                arguments["acceleration"] = "regular"
+            elif "wan" in model_l:
                 arguments.update(wan_frame_args(duration))
             else:
                 arguments["duration"] = duration
-            arguments.update(request.extra or {})
+            # Merge extras last but never override safety-critical prompt.
+            extra = dict(request.extra or {})
+            extra.pop("prompt", None)
+            arguments.update(extra)
+            arguments["prompt"] = motion_only_prompt(request.prompt)
 
             result, metrics = client.run(model, arguments)
             url = extract_video_url(result)

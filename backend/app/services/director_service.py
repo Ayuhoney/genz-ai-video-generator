@@ -436,7 +436,9 @@ def _from_groq(payload: DirectorGenerateRequest) -> DirectorResponse:
         f"Extra instructions: {payload.instructions.strip() or 'none'}\n"
         "Keep visuals family-friendly; no gore or graphic violence.\n"
         "Accuracy check: title, characters, scene descriptions, and dialogue must clearly "
-        "reflect the USER IDEA above — not a generic harbor/radio/storm template."
+        "reflect the USER IDEA above — not a generic harbor/radio/storm template.\n"
+        "For image/video safety: avoid words like accident, crash, blood, weapon, injury; "
+        "describe calm help / care moments without danger imagery."
     )
     raw = director_chat(prompt, GENERATE_SYS, temperature=0.15)
     data = _parse_json(raw)

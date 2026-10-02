@@ -92,8 +92,17 @@ def _parse_list(value: str | list[str] | None) -> list[str]:
 
 
 def _chain(primary: str, fallbacks: str | list[str] | None) -> list[str]:
-    names = [primary.strip()] if primary.strip() else ["mock"]
+    primary_name = (primary or "").strip()
+    if not primary_name:
+        raise ProviderError(
+            "Primary provider is empty — set PROVIDER_IMAGE/VIDEO/TTS/SFX/MUSIC",
+            errors=["missing primary provider"],
+        )
+    names = [primary_name]
     for name in _parse_list(fallbacks):
+        # Never silently degrade to mock in production chains.
+        if name == "mock":
+            continue
         if name not in names:
             names.append(name)
     return names
@@ -120,6 +129,16 @@ def call_with_retry(
             last_error.__cause__ = exc
         except Exception as exc:  # noqa: BLE001
             last_error = exc
+            retryable = getattr(exc, "retryable", True)
+            if retryable is False:
+                raise
+            try:
+                from app.providers.fal.client import is_content_blocked_error
+
+                if is_content_blocked_error(exc):
+                    raise
+            except ImportError:
+                pass
         if attempt < attempts - 1:
             time.sleep(backoff_base * (2**attempt))
     assert last_error is not None

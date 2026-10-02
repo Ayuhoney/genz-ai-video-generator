@@ -114,9 +114,75 @@ def plan_shot_count(total_seconds: int, clip: int = DEFAULT_CLIP_SECONDS) -> int
 
 
 def soft_visual_prompt(text: str) -> str:
-    """Append safety-friendly cinematic constraints (reduces content-checker fails)."""
-    base = (text or "").strip() or "cinematic film moment"
+    """Sanitize + append safety-friendly cinematic constraints."""
+    base = _scrub_risky_words((text or "").strip() or "cinematic film moment")
     return (
-        f"{base}. Family-friendly cinematic style, no gore, no blood, no graphic violence, "
-        "no weapons aimed at camera, tasteful drama, film lighting."
+        f"{base}. Family-friendly cinematic still, soft film lighting, "
+        "peaceful everyday life, no gore, no blood, no weapons, no graphic violence, "
+        "no injury, tasteful drama, PG rating."
     )
+
+
+def motion_only_prompt(text: str | None = None) -> str:
+    """i2v prompts must describe CAMERA MOTION only — narrative words trip fal checkers."""
+    _ = _scrub_risky_words(text or "")
+    return (
+        "Gentle cinematic camera motion: slow push-in, subtle parallax, "
+        "natural ambient movement, warm soft lighting, calm family-friendly mood, "
+        "no violence, no injury, no weapons, peaceful everyday scene."
+    )
+
+
+_RISKY = (
+    "accident",
+    "crash",
+    "collide",
+    "collision",
+    "emergency",
+    "brake",
+    "blood",
+    "gore",
+    "kill",
+    "murder",
+    "weapon",
+    "gun",
+    "knife",
+    "fight",
+    "attack",
+    "hurt",
+    "injury",
+    "injured",
+    "dead",
+    "death",
+    "die",
+    "dying",
+    "scream",
+    "danger",
+    "disaster",
+    "explode",
+    "bomb",
+    "suicide",
+    "rape",
+    "nude",
+    "naked",
+    "sex",
+    "violence",
+    "violent",
+    "war",
+    "shoot",
+    "stab",
+    "threat",
+    "panic",
+    "fear",
+    "terrify",
+)
+
+
+def _scrub_risky_words(text: str) -> str:
+    import re
+
+    out = text
+    for word in _RISKY:
+        out = re.sub(rf"\b{re.escape(word)}\b", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\s{2,}", " ", out).strip(" ,.-")
+    return out or "peaceful cinematic moment"

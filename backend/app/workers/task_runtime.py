@@ -13,6 +13,7 @@ from celery import Task
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.providers.base import BudgetExceededError
+from app.providers.fal.client import FalAPIError, is_content_blocked_error
 from app.workers import job_store
 from app.workers.settings import get_worker_settings
 
@@ -99,6 +100,14 @@ def run_mock_job(
         notify_api_job_complete(job_id)
         raise
     except Exception as exc:
+        # Content-policy / non-retryable provider errors: fail once (save fal credits).
+        non_retryable = isinstance(exc, FalAPIError) and (
+            getattr(exc, "retryable", True) is False or is_content_blocked_error(exc)
+        )
+        if non_retryable or is_content_blocked_error(exc):
+            job_store.mark_job_failed(db, job_id, str(exc))
+            notify_api_job_complete(job_id)
+            raise
         retries = self.request.retries
         max_retries = get_worker_settings().celery_max_retries
         if retries < max_retries:

@@ -64,12 +64,12 @@ class Settings(BaseSettings):
         alias="PRESIGNED_URL_EXPIRE_SECONDS",
     )
 
-    # Providers (default mock)
-    provider_image: str = Field(default="mock", alias="PROVIDER_IMAGE")
-    provider_video: str = Field(default="mock", alias="PROVIDER_VIDEO")
-    provider_tts: str = Field(default="mock", alias="PROVIDER_TTS")
-    provider_sfx: str = Field(default="mock", alias="PROVIDER_SFX")
-    provider_music: str = Field(default="mock", alias="PROVIDER_MUSIC")
+    # Providers — production defaults (tests override via env)
+    provider_image: str = Field(default="fal", alias="PROVIDER_IMAGE")
+    provider_video: str = Field(default="fal", alias="PROVIDER_VIDEO")
+    provider_tts: str = Field(default="sarvam", alias="PROVIDER_TTS")
+    provider_sfx: str = Field(default="fal", alias="PROVIDER_SFX")
+    provider_music: str = Field(default="fal", alias="PROVIDER_MUSIC")
     provider_image_fallbacks: str = Field(default="", alias="PROVIDER_IMAGE_FALLBACKS")
     provider_video_fallbacks: str = Field(default="", alias="PROVIDER_VIDEO_FALLBACKS")
     provider_tts_fallbacks: str = Field(default="", alias="PROVIDER_TTS_FALLBACKS")

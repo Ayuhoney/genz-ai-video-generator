@@ -25,7 +25,11 @@ from app.storage.asset_store import (
 )
 from app.media.ffprobe import probe_duration_seconds, suffix_for_mime
 from app.providers.sarvam.audio import language_to_sarvam_code
-from app.providers.fal.clip_timing import clamp_clip_seconds, soft_visual_prompt
+from app.providers.fal.clip_timing import (
+    clamp_clip_seconds,
+    motion_only_prompt,
+    soft_visual_prompt,
+)
 from app.workers import job_store
 from app.workers.project_context import (
     build_music_prompt,
@@ -318,8 +322,9 @@ def produce_video(job: dict[str, Any]) -> dict[str, Any]:
             project_id=job["project_id"],
             scene_id=job.get("scene_id"),
             shot_id=job.get("shot_id"),
-            prompt=soft_visual_prompt(
-                str(inp.get("prompt") or job.get("shot_id") or "subtle camera motion")
+            # i2v: image already carries the scene — prompt is camera motion only.
+            prompt=motion_only_prompt(
+                str(inp.get("prompt") or inp.get("camera") or "")
             ),
             duration_seconds=duration,
             image_url=image_url,
@@ -446,7 +451,7 @@ def produce_passthrough_media(
         mime_type=mime_type,
         filename=filename,
         cost_usd=cost_usd,
-        provider_name="mock-pipeline",
+        provider_name="ffmpeg",
         duration_seconds=duration,
         metadata={"pipeline": asset_type},
     )

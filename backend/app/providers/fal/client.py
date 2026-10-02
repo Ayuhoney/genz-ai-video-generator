@@ -16,9 +16,37 @@ STORAGE_INITIATE = "https://rest.fal.ai/storage/upload/initiate"
 
 
 class FalAPIError(Exception):
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool = True,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.retryable = retryable
+
+
+def is_content_blocked_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    markers = (
+        "content checker",
+        "flagged",
+        "safety checker",
+        "content could not be processed",
+        "nsfw",
+        "moderation",
+    )
+    return any(m in text for m in markers)
+
+
+def _raise_fal(message: str, *, status_code: int | None = None) -> None:
+    retryable = not is_content_blocked_error(Exception(message))
+    # Content / validation blocks should fail fast (no burn retries).
+    if status_code == 422:
+        retryable = False
+    raise FalAPIError(message, status_code=status_code, retryable=retryable)
 
 
 class FalClient:
@@ -70,7 +98,7 @@ class FalClient:
             json=arguments,
         )
         if response.status_code >= 400:
-            raise FalAPIError(
+            _raise_fal(
                 f"fal submit failed ({response.status_code}): {response.text[:500]}",
                 status_code=response.status_code,
             )
@@ -87,7 +115,7 @@ class FalClient:
             params=params,
         )
         if response.status_code >= 400:
-            raise FalAPIError(
+            _raise_fal(
                 f"fal status failed ({response.status_code}): {response.text[:500]}",
                 status_code=response.status_code,
             )
@@ -99,7 +127,7 @@ class FalClient:
         if response.status_code == 202:
             raise FalAPIError("fal result not ready (202)", status_code=202)
         if response.status_code >= 400:
-            raise FalAPIError(
+            _raise_fal(
                 f"fal result failed ({response.status_code}): {response.text[:500]}",
                 status_code=response.status_code,
             )
@@ -130,15 +158,25 @@ class FalClient:
             state = status.get("status")
             if state == "COMPLETED":
                 if status.get("error"):
-                    raise FalAPIError(
+                    _raise_fal(
                         f"fal request failed: {status.get('error')} "
-                        f"({status.get('error_type')})"
+                        f"({status.get('error_type')})",
+                        status_code=422,
                     )
                 metrics = dict(status.get("metrics") or {})
-                result = self.get_result(result_url)
+                # Turbo/content-checker often returns COMPLETED then 422 on result URL.
+                try:
+                    result = self.get_result(result_url)
+                except FalAPIError as exc:
+                    if is_content_blocked_error(exc) or exc.status_code == 422:
+                        raise
+                    raise
                 return result, metrics
             if state in {"FAILED", "CANCELLED", "CANCELED"}:
-                raise FalAPIError(f"fal request ended with status={state}: {status}")
+                _raise_fal(
+                    f"fal request ended with status={state}: {status}",
+                    status_code=422 if is_content_blocked_error(Exception(str(status))) else None,
+                )
             # IN_QUEUE / IN_PROGRESS — keep polling
             time.sleep(self.poll_interval)
 
