@@ -138,27 +138,38 @@ def dispatch_audio_jobs(
     genre: str | None = None,
 ) -> list[str]:
     """Per-scene TTS, SFX, and background music."""
+    from app.workers.project_context import get_project_doc, spoken_text_for_scene
+
+    project = get_project_doc(project_id) or {}
+    lang = (language or str(project.get("language") or "Hindi")).strip() or "Hindi"
     jobs: list[dict[str, Any]] = []
     for scene in scenes:
         scene_id = scene["id"] if isinstance(scene, dict) else str(scene)
         title = str(scene.get("title") or scene_id) if isinstance(scene, dict) else scene_id
         description = str(scene.get("description") or "") if isinstance(scene, dict) else ""
         duration = float(scene.get("duration_seconds") or 10) if isinstance(scene, dict) else 10.0
+        # Spoken lines in selected language — never the English visual description.
+        narration = spoken_text_for_scene(
+            project_id,
+            scene_id,
+            scene=scene if isinstance(scene, dict) else None,
+            language=lang,
+        )
         base = {
             "scene_id": scene_id,
             "scene_title": title,
             "scene_description": description,
             "duration_seconds": duration,
-            "language": language,
+            "language": lang,
             "genre": genre,
-            "script": description,
+            "script": narration,
         }
         jobs.append(
             create_job(
                 project_id=project_id,
                 task_type="tts",
                 scene_id=scene_id,
-                input_payload={**base, "text": description},
+                input_payload={**base, "text": narration},
             )
         )
         jobs.append(

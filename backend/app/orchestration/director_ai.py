@@ -137,14 +137,17 @@ DIRECTOR_SYS = """You are a film director for a short AI video.
 Return ONLY valid JSON:
 {"title": str,
  "scenes": [{"id": "scene-1", "order": 1, "title": str,
-   "description": "What we SEE + spoken narration draft (max 25 words spoken)",
+   "description": "What we SEE in English (visual only)",
+   "narration": "spoken lines ONLY in the target language native script",
    "duration_seconds": number (sum of shot lengths),
    "motion": "camera + subject movement",
    "sfx": "comma-separated ambient sounds, no speech",
    "shots": [{"order": 1, "title": str, "description": str, "duration_seconds": 15}]}]}
 Rules: each shot duration_seconds MUST be 10-15 (prefer 15); enough shots to cover total duration;
 family-friendly cinematic; no gore/blood/nudity; never use double quotes inside string values;
-use target language for spoken lines inside description; follow the user's story idea exactly."""
+CRITICAL: narration MUST be in the selected target language native script (Hindi→Devanagari);
+do NOT put English spoken lines in narration unless language is English;
+follow the user's story idea exactly."""
 
 
 def plan_with_groq(
@@ -158,7 +161,9 @@ def plan_with_groq(
 ) -> tuple[dict[str, Any], list[SceneState], list[ShotState]]:
     n = max(2, min(6, scene_count))
     prompt = (
-        f"Project: {project_id}\nGenre: {genre}\nLanguage for spoken lines: {language}\n"
+        f"Project: {project_id}\nGenre: {genre}\n"
+        f"TARGET LANGUAGE FOR narration: {language}\n"
+        f"Write narration in {language} native script. No English dialogue unless language is English.\n"
         f"Target total duration about {duration_seconds}s\nScenes: {n}\n"
         f"Story/idea (follow exactly): {story or 'A short cinematic story'}"
     )
@@ -171,28 +176,44 @@ def plan_with_groq(
         "provider": "groq",
         "beats": [str(s.get("title") or "") for s in (data.get("scenes") or [])],
         "raw": {"genre": genre, "language": language},
+        "language": language,
     }
     scenes: list[SceneState] = []
     shots: list[ShotState] = []
+    from app.workers.project_context import fallback_spoken_line
+
     for index, sc in enumerate((data.get("scenes") or [])[:n], start=1):
         sid = str(sc.get("id") or f"scene-{index}")
         dur = float(sc.get("duration_seconds") or max(8, duration_seconds // n))
         dur = max(6.0, min(24.0, dur))
         desc = str(sc.get("description") or sc.get("action") or "").strip()
+        narration = str(sc.get("narration") or "").strip()
         motion = str(sc.get("motion") or "").strip()
         sfx = str(sc.get("sfx") or "").strip()
         if motion:
             desc = f"{desc} Motion: {motion}".strip()
         if sfx:
             desc = f"{desc} SFX: {sfx}".strip()
+        scene_title = str(sc.get("title") or f"Scene {index}")
+        if not narration:
+            narration = fallback_spoken_line(language=language, scene_title=scene_title)
         scenes.append(
             {
                 "id": sid,
                 "order": int(sc.get("order") or index),
-                "title": str(sc.get("title") or f"Scene {index}"),
+                "title": scene_title,
                 "description": desc or f"Scene {index}",
                 "duration_seconds": dur,
                 "status": "pending",
+                "narration": narration,
+                "voice_over": [
+                    {
+                        "id": f"{sid}-vo-1",
+                        "character_name": "Narrator",
+                        "text": narration,
+                        "estimated_seconds": min(8.0, dur * 0.4),
+                    }
+                ],
             }
         )
         shot_specs = sc.get("shots") or []

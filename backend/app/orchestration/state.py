@@ -48,6 +48,9 @@ class SceneState(TypedDict):
     description: str
     duration_seconds: int
     status: ItemStatus
+    # Spoken narration for TTS (target language). Visual description stays English.
+    narration: NotRequired[str]
+    voice_over: NotRequired[list[dict[str, Any]]]
 
 
 class ShotState(TypedDict):

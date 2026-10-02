@@ -34,6 +34,7 @@ from app.workers import job_store
 from app.workers.project_context import (
     build_music_prompt,
     build_sfx_prompt,
+    fallback_spoken_line,
     get_project_doc,
     locked_character_refs,
     scene_script_from_graph,
@@ -348,20 +349,25 @@ def produce_video(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def _audio_context(job: dict[str, Any]) -> dict[str, Any]:
+    from app.workers.project_context import spoken_text_for_scene
+
     inp = job.get("input") or {}
     project = get_project_doc(job["project_id"]) or {}
-    language = str(inp.get("language") or project.get("language") or "Hindi")
+    language = str(inp.get("language") or project.get("language") or "Hindi").strip() or "Hindi"
     genre = str(inp.get("genre") or project.get("genre") or "Drama")
     scene_id = job.get("scene_id")
-    script = str(
-        inp.get("script")
-        or inp.get("text")
-        or scene_script_from_graph(job["project_id"], scene_id)
-        or inp.get("scene_description")
-        or ""
-    ).strip()
+    # Prefer explicit TTS payload, then voiceOver/narration — never visual description.
+    script = str(inp.get("text") or inp.get("script") or "").strip()
+    if not script:
+        script = spoken_text_for_scene(
+            job["project_id"],
+            scene_id,
+            language=language,
+        )
+    if not script:
+        script = scene_script_from_graph(job["project_id"], scene_id)
     scene_title = str(inp.get("scene_title") or scene_id or "Scene")
-    scene_description = str(inp.get("scene_description") or script)
+    scene_description = str(inp.get("scene_description") or "")
     duration = float(
         inp.get("duration_seconds")
         or inp.get("scene_duration_seconds")
@@ -381,7 +387,10 @@ def _audio_context(job: dict[str, Any]) -> dict[str, Any]:
 def produce_tts(job: dict[str, Any]) -> dict[str, Any]:
     enforce_budget(job["project_id"])
     ctx = _audio_context(job)
-    text = ctx["script"] or f"Narration for {job.get('scene_id') or 'scene'}."
+    text = ctx["script"] or fallback_spoken_line(
+        language=ctx["language"],
+        scene_title=str(job.get("scene_id") or "Scene"),
+    )
     result = get_registry().generate_tts(
         TTSRequest(
             project_id=job["project_id"],

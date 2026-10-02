@@ -276,16 +276,18 @@ def validate_director_plan(
             ]
         # Ensure voice continuity for production-ready dialogue.
         if not scene.voice_over:
+            from app.workers.project_context import fallback_spoken_line
+
             lead = characters[0]
-            snippet = (scene.description or scene.title or "").strip()
-            if len(snippet) > 80:
-                snippet = snippet[:77] + "..."
             scene.voice_over = [
                 VoiceLine(
                     id=f"{scene.id}-vo-1",
                     character_id=lead.id,
                     character_name=lead.name,
-                    text=snippet or f"({payload.language})",
+                    text=fallback_spoken_line(
+                        language=payload.language,
+                        scene_title=scene.title or scene.id,
+                    ),
                     estimated_seconds=3.0,
                 )
             ]

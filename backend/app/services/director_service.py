@@ -29,7 +29,8 @@ GENERATE_SYS = """You are an expert film director and screenwriter for an AI vid
 Write a NEW screenplay that matches the user's idea EXACTLY — do not reuse unrelated stock stories.
 Ground every scene in concrete nouns from the user's idea (places, props, jobs, relationships).
 The `script` field MUST be a proper cinematic screenplay (not a shot list): use INT./EXT. scene
-headings, present-tense action lines, character cues, and dialogue in the TARGET LANGUAGE.
+headings, present-tense action lines, character cues, and dialogue in the TARGET LANGUAGE
+using that language's native script (e.g. Hindi → Devanagari, Tamil → Tamil script).
 Mention the selected GENRE in the concept. Story must have a clear beginning, middle, and ending.
 Each SHOT becomes one fal image-to-video clip. Every shot durationSeconds MUST be 5-15 (prefer 15).
 Sum of ALL shot durations MUST equal the target total duration exactly.
@@ -40,13 +41,17 @@ Return ONLY valid JSON (no markdown):
  "storyStructure": ["beat 1", ...],
  "characters": [{"id": "char-1", "name": str, "role": str, "description": "look + personality 20-40 words"}],
  "scenes": [{"id": "scene-1", "order": 1, "title": str,
-   "description": "what we SEE (family-friendly, no gore)",
+   "description": "what we SEE — write this visual action in English for image/video models",
    "durationSeconds": number (sum of its shots),
    "sfxNotes": "ambient sounds, no speech",
-   "voiceOver": [{"id": "vo-1", "characterId": "char-1 or null", "characterName": str, "text": "spoken line in target language", "estimatedSeconds": number}],
+   "voiceOver": [{"id": "vo-1", "characterId": "char-1 or null", "characterName": str, "text": "spoken line ONLY in target language native script", "estimatedSeconds": number}],
    "shots": [{"id": "shot-1", "order": 1, "title": str, "description": str, "durationSeconds": 15, "camera": "angle/move"}]}]}
 Rules: follow the user's idea; each shot durationSeconds <= 15; 1-4 shots per scene;
-shot durations must sum to the target duration; dialogue ONLY in the target language;
+shot durations must sum to the target duration;
+CRITICAL LANGUAGE RULE: every voiceOver.text and all dialogue in `script` MUST be in the
+selected target language and its native script. If language is Hindi, write Hindi in Devanagari
+(example: "यह मेरी कहानी है।") — NEVER English sentences in voiceOver when language is not English.
+Scene description/shots stay in English for visuals; spoken audio comes only from voiceOver.
 cinematic continuity across scenes; no gore/blood/nudity; never use double quotes inside string values;
 do NOT set faceLocked or referenceImageUrl (face lock is user-uploaded later)."""
 
@@ -428,7 +433,12 @@ def _from_groq(payload: DirectorGenerateRequest) -> DirectorResponse:
     clip = _clip_len()
     n_shots = plan_shot_count(payload.duration_seconds, clip)
     prompt = (
-        f"Genre: {payload.genre}\nLanguage for spoken lines: {payload.language}\n"
+        f"Genre: {payload.genre}\n"
+        f"TARGET LANGUAGE FOR ALL SPOKEN LINES: {payload.language}\n"
+        f"Write every voiceOver.text and script dialogue in {payload.language} "
+        f"using native script (Hindi→Devanagari). Do NOT write English dialogue "
+        f"unless the target language is English.\n"
+        f"Visual scene/shot descriptions may stay in English.\n"
         f"Target total duration: {payload.duration_seconds}s\n"
         f"Each shot MUST be {clip} seconds (fal clip max 15s). "
         f"Create about {n_shots} shots total across enough scenes.\n"
