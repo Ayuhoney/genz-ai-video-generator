@@ -64,24 +64,29 @@ export const MOCK_DIRECTOR_RESPONSE: DirectorResponse = {
   title: 'Signal in the Fog',
   concept:
     'A coastal radio operator receives a mysterious signal during a storm and must decide whether to trust it before the harbor closes.',
+  script:
+    'SCENE 1 — HARBOR AT DUSK\nACTION: Fog rolls over boats. Mara starts her checklist.\nMARA: "Checklist complete. Waiting on channel three."',
   characters: [
     {
       id: 'char-1',
       name: 'Mara Ellison',
       role: 'Protagonist',
       description: 'Night-shift radio operator; calm under pressure, quietly curious.',
+      faceLocked: false,
     },
     {
       id: 'char-2',
       name: 'Jonah Price',
       role: 'Supporting',
       description: 'Harbor dispatcher who urges caution and wants the night to end quietly.',
+      faceLocked: false,
     },
     {
       id: 'char-3',
       name: 'The Signal',
       role: 'Antagonist / Mystery',
       description: 'An unidentified voice that knows too much about tomorrow’s weather.',
+      faceLocked: false,
     },
   ],
   storyStructure: [
@@ -100,6 +105,34 @@ export const MOCK_DIRECTOR_RESPONSE: DirectorResponse = {
         'Wide shot of boats rocking as fog rolls in. Mara enters the radio shack and starts her checklist.',
       durationSeconds: 12,
       status: 'pending',
+      sfxNotes: 'Ocean wind, buoy bell',
+      voiceOver: [
+        {
+          id: 'vo-1',
+          characterId: 'char-1',
+          characterName: 'Mara Ellison',
+          text: 'Checklist complete. Waiting on channel three.',
+          estimatedSeconds: 3,
+        },
+      ],
+      shots: [
+        {
+          id: 's1-a',
+          order: 1,
+          title: 'Establish',
+          description: 'Wide foggy harbor',
+          durationSeconds: 6,
+          camera: 'Wide push-in',
+        },
+        {
+          id: 's1-b',
+          order: 2,
+          title: 'Detail',
+          description: 'Mara at the radio desk',
+          durationSeconds: 6,
+          camera: 'Medium',
+        },
+      ],
     },
     {
       id: 'scene-2',

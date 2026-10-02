@@ -41,6 +41,25 @@ export interface Character {
   name: string
   description: string
   role: string
+  referenceImageUrl?: string | null
+  faceLocked?: boolean
+}
+
+export interface ShotPlan {
+  id: string
+  order: number
+  title: string
+  description: string
+  durationSeconds: number
+  camera?: string
+}
+
+export interface VoiceLine {
+  id: string
+  characterId?: string | null
+  characterName: string
+  text: string
+  estimatedSeconds: number
 }
 
 export type ProductionStatus = 'pending' | 'running' | 'completed' | 'failed'
@@ -52,15 +71,27 @@ export interface Scene {
   description: string
   durationSeconds: number
   status: ProductionStatus
+  shots?: ShotPlan[]
+  voiceOver?: VoiceLine[]
+  sfxNotes?: string
 }
 
 export interface DirectorResponse {
   title: string
   concept: string
+  script: string
   characters: Character[]
   storyStructure: string[]
   scenes: Scene[]
   estimatedDurationSeconds: number
+}
+
+export interface FalCredits {
+  available: boolean
+  balance: number | null
+  currency: string
+  username: string | null
+  message: string | null
 }
 
 export type ProductionStageId =

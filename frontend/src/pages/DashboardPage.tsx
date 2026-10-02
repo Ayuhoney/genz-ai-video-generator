@@ -11,17 +11,16 @@ export function DashboardPage() {
   const { data, error, isLoading, reload } = useAsync(getProjects, 'projects')
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+    <div className="space-y-8">
+      <div className="anim-rise flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Dashboard
-          </h1>
-          <p className="mt-1 text-sm text-[var(--color-ink-muted)]">
-            Your projects and production status at a glance.
+          <p className="gc-eyebrow">Your studio</p>
+          <h1 className="page-title mt-2">Dashboard</h1>
+          <p className="body-muted mt-3 max-w-lg">
+            Projects, production status, and finished films — one destination.
           </p>
         </div>
-        <Button onClick={() => navigate('/create')}>
+        <Button onClick={() => navigate('/create')} size="lg">
           <Plus className="h-4 w-4" />
           New Video
         </Button>
@@ -30,7 +29,7 @@ export function DashboardPage() {
       {isLoading ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, index) => (
-            <Skeleton key={index} className="h-44" />
+            <Skeleton key={index} className="h-48 rounded-[1.25rem]" />
           ))}
         </div>
       ) : null}
@@ -42,7 +41,7 @@ export function DashboardPage() {
       {!isLoading && !error && data && data.length === 0 ? (
         <EmptyState
           title="No projects yet"
-          description="Create your first video idea and let the AI Director draft a full production plan."
+          description="Create your first video idea and let Cine AI draft a full production plan."
           action={
             <Button onClick={() => navigate('/create')}>
               <Plus className="h-4 w-4" />
@@ -53,7 +52,7 @@ export function DashboardPage() {
       ) : null}
 
       {!isLoading && !error && data && data.length > 0 ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="anim-rise-delay grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {data.map((project) => (
             <ProjectCard key={project.id} project={project} />
           ))}

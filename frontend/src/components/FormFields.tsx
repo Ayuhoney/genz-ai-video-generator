@@ -1,7 +1,7 @@
 import type { InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react'
 
 const fieldClass =
-  'w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-muted)] focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/20'
+  'w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-base text-[var(--color-ink)] outline-none transition placeholder:text-[var(--color-ink-muted)]/80 focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/15'
 
 interface FieldWrapProps {
   label: string
@@ -12,11 +12,11 @@ interface FieldWrapProps {
 
 export function FieldWrap({ label, error, htmlFor, children }: FieldWrapProps) {
   return (
-    <label className="block space-y-1.5" htmlFor={htmlFor}>
-      <span className="text-sm font-medium text-[var(--color-ink)]">{label}</span>
+    <label className="block space-y-2" htmlFor={htmlFor}>
+      <span className="label-text">{label}</span>
       {children}
       {error ? (
-        <span className="block text-sm text-[var(--color-danger)]">{error}</span>
+        <span className="block text-sm font-medium text-[var(--color-danger)]">{error}</span>
       ) : null}
     </label>
   )

@@ -21,7 +21,7 @@ class FilmStudioSettings(BaseSettings):
     gemini_key: str = Field(default="", alias="GEMINI_KEY")
 
     gemini_model: str = Field(
-        default="gemini-2.0-flash",
+        default="gemini-3.8-flash",
         alias="GEMINI_MODEL",
     )
     # Model IDs via env (never commit secrets; examples in .env.example)

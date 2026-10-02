@@ -1,4 +1,4 @@
-"""Gemini-powered director for LangGraph (falls back to mock when disabled)."""
+"""Groq-powered director for LangGraph (falls back to mock when disabled)."""
 
 from __future__ import annotations
 
@@ -14,6 +14,9 @@ try:
     from json_repair import repair_json
 except ImportError:
     repair_json = None  # type: ignore[misc, assignment]
+
+GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 
 
 def _settings() -> Any:
@@ -32,19 +35,24 @@ def director_provider() -> str:
     return (getattr(s, "director_provider", None) or "mock").strip().lower()
 
 
-def gemini_enabled() -> bool:
+def groq_enabled() -> bool:
     s = _settings()
     return bool(
-        director_provider() == "gemini"
-        and (getattr(s, "gemini_key", None) or "").strip()
-        and (getattr(s, "gemini_model", None) or "").strip()
+        director_provider() == "groq"
+        and (getattr(s, "groq_key", None) or "").strip()
+        and (getattr(s, "groq_model", None) or DEFAULT_GROQ_MODEL).strip()
     )
+
+
+# Back-compat alias used by older imports / tests
+def gemini_enabled() -> bool:
+    return groq_enabled()
 
 
 def _parse_json(text: str) -> dict[str, Any]:
     t = re.sub(r"```(?:json)?", "", text or "")
     if "{" not in t:
-        raise ValueError("Gemini response missing JSON")
+        raise ValueError("Director response missing JSON")
     chunk = t[t.index("{") :]
     try:
         return json.loads(chunk[: chunk.rindex("}") + 1])
@@ -54,33 +62,75 @@ def _parse_json(text: str) -> dict[str, Any]:
         raise
 
 
-def _gemini_chat(prompt: str, system: str) -> str:
+def _retry_after_seconds(response: httpx.Response, body_text: str) -> float:
+    header = (response.headers.get("retry-after") or "").strip()
+    if header:
+        try:
+            return max(1.0, float(header))
+        except ValueError:
+            pass
+    match = re.search(r"try again in ([0-9.]+)s", body_text, flags=re.I)
+    if match:
+        try:
+            return max(1.0, float(match.group(1)) + 0.5)
+        except ValueError:
+            pass
+    return 8.0
+
+
+def _groq_chat(prompt: str, system: str, *, temperature: float = 0.2) -> str:
+    import time
+
     s = _settings()
-    key = (s.gemini_key or "").strip()
-    model = (s.gemini_model or "").strip()
+    key = (getattr(s, "groq_key", None) or "").strip()
+    model = (getattr(s, "groq_model", None) or DEFAULT_GROQ_MODEL).strip()
+    if not key:
+        raise RuntimeError("GROQ_KEY required for director")
     body: dict[str, Any] = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.3,
-            "maxOutputTokens": 8000,
-            "responseMimeType": "application/json",
-        },
-        "systemInstruction": {"parts": [{"text": system}]},
+        "model": model,
+        "temperature": temperature,
+        "max_completion_tokens": 8000,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
     }
+    last_err = "groq unknown error"
     with httpx.Client(timeout=120.0) as client:
-        r = client.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-            headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-            json=body,
-        )
-        if r.status_code >= 400:
-            raise RuntimeError(f"gemini {r.status_code}: {r.text[:300]}")
-        cands = r.json().get("candidates") or []
-        parts = (cands[0].get("content") or {}).get("parts", []) if cands else []
-        text = "".join(p.get("text", "") for p in parts)
-        if not text.strip():
-            raise RuntimeError("gemini empty response")
-        return text
+        for attempt in range(5):
+            r = client.post(
+                GROQ_CHAT_URL,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+            )
+            if r.status_code == 429:
+                last_err = f"groq 429: {r.text[:300]}"
+                time.sleep(_retry_after_seconds(r, r.text))
+                continue
+            if r.status_code >= 400:
+                raise RuntimeError(f"groq {r.status_code}: {r.text[:300]}")
+            data = r.json()
+            choices = data.get("choices") or []
+            if not choices:
+                raise RuntimeError("groq empty choices")
+            text = str((choices[0].get("message") or {}).get("content") or "")
+            if not text.strip():
+                raise RuntimeError("groq empty response")
+            return text
+    raise RuntimeError(last_err)
+
+# Public chat entry used by director_service
+def director_chat(prompt: str, system: str, *, temperature: float = 0.2) -> str:
+    return _groq_chat(prompt, system, temperature=temperature)
+
+
+# Legacy name kept so older imports keep working during migration
+def _gemini_chat(prompt: str, system: str) -> str:
+    return director_chat(prompt, system)
 
 
 DIRECTOR_SYS = """You are a film director for a short AI video.
@@ -88,15 +138,16 @@ Return ONLY valid JSON:
 {"title": str,
  "scenes": [{"id": "scene-1", "order": 1, "title": str,
    "description": "What we SEE + spoken narration draft (max 25 words spoken)",
-   "duration_seconds": number between 6 and 20,
-   "motion": "camera + subject movement for ~5s clips",
+   "duration_seconds": number (sum of shot lengths),
+   "motion": "camera + subject movement",
    "sfx": "comma-separated ambient sounds, no speech",
-   "shots": [{"order": 1, "title": str, "description": str, "duration_seconds": number}]}]}
-Rules: 2-6 scenes; each scene 1-2 shots; total spoken text short; cinematic; no gore/blood/nudity;
-never use double quotes inside string values; use target language for spoken lines inside description."""
+   "shots": [{"order": 1, "title": str, "description": str, "duration_seconds": 15}]}]}
+Rules: each shot duration_seconds MUST be 10-15 (prefer 15); enough shots to cover total duration;
+family-friendly cinematic; no gore/blood/nudity; never use double quotes inside string values;
+use target language for spoken lines inside description; follow the user's story idea exactly."""
 
 
-def plan_with_gemini(
+def plan_with_groq(
     *,
     project_id: str,
     story: str,
@@ -109,15 +160,15 @@ def plan_with_gemini(
     prompt = (
         f"Project: {project_id}\nGenre: {genre}\nLanguage for spoken lines: {language}\n"
         f"Target total duration about {duration_seconds}s\nScenes: {n}\n"
-        f"Story/idea: {story or 'A short cinematic story'}"
+        f"Story/idea (follow exactly): {story or 'A short cinematic story'}"
     )
-    raw = _gemini_chat(prompt, DIRECTOR_SYS)
+    raw = director_chat(prompt, DIRECTOR_SYS)
     data = _parse_json(raw)
     title = str(data.get("title") or f"Film {project_id[:8]}")
     plan = {
         "project_id": project_id,
         "title": title,
-        "provider": "gemini",
+        "provider": "groq",
         "beats": [str(s.get("title") or "") for s in (data.get("scenes") or [])],
         "raw": {"genre": genre, "language": language},
     }
@@ -161,7 +212,9 @@ def plan_with_gemini(
                     "duration_seconds": max(3.0, round(dur - half, 2)),
                 },
             ]
-        for s_index, sh in enumerate(shot_specs[:3], start=1):
+        for s_index, sh in enumerate(shot_specs[:8], start=1):
+            from app.providers.fal.clip_timing import clamp_clip_seconds
+
             shots.append(
                 {
                     "id": f"{sid}-shot-{s_index}",
@@ -170,12 +223,36 @@ def plan_with_gemini(
                     "title": str(sh.get("title") or f"{sid} / Shot {s_index}"),
                     "description": str(sh.get("description") or desc),
                     "status": "pending",
-                    "duration_seconds": float(sh.get("duration_seconds") or max(3.0, dur / 2)),
+                    "duration_seconds": float(
+                        clamp_clip_seconds(
+                            sh.get("duration_seconds") or sh.get("durationSeconds") or 15
+                        )
+                    ),
                 }
             )
     if not scenes:
-        raise RuntimeError("Gemini returned no scenes")
+        raise RuntimeError("Groq returned no scenes")
     return plan, scenes, shots
+
+
+# Back-compat alias
+def plan_with_gemini(
+    *,
+    project_id: str,
+    story: str,
+    language: str,
+    genre: str,
+    duration_seconds: int,
+    scene_count: int = 3,
+) -> tuple[dict[str, Any], list[SceneState], list[ShotState]]:
+    return plan_with_groq(
+        project_id=project_id,
+        story=story,
+        language=language,
+        genre=genre,
+        duration_seconds=duration_seconds,
+        scene_count=scene_count,
+    )
 
 
 def load_project_story(project_id: str) -> dict[str, Any]:

@@ -44,6 +44,27 @@ async def create_project(
     payload: ProjectCreate,
 ) -> ProjectResponse:
     now = datetime.now(UTC)
+    director_response = payload.director_response
+    if isinstance(director_response, dict) and director_response:
+        try:
+            from app.schemas.director import DirectorGenerateRequest
+            from app.services.director_validate import director_plan_from_dict
+
+            validated = director_plan_from_dict(
+                director_response,
+                DirectorGenerateRequest(
+                    idea=payload.idea or payload.title,
+                    duration_seconds=payload.duration_seconds,
+                    language=payload.language,
+                    genre=payload.genre,
+                    instructions="",
+                ),
+            )
+            director_response = validated.model_dump(by_alias=True)
+        except Exception:
+            # Keep original payload if re-validation fails; generate path already validates.
+            pass
+
     document = {
         "user_id": user.id,
         "title": payload.title,
@@ -53,7 +74,7 @@ async def create_project(
         "genre": payload.genre,
         "idea": payload.idea,
         "concept": payload.concept,
-        "director_response": payload.director_response,
+        "director_response": director_response,
         "created_at": now,
         "updated_at": now,
     }

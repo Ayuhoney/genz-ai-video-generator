@@ -6,7 +6,7 @@ export function Spinner({ label = 'Loading…' }: { label?: string }) {
   return (
     <div className="flex flex-col items-center justify-center gap-3 py-16 text-[var(--color-ink-muted)]">
       <span className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--color-accent)] border-r-transparent" />
-      <p className="text-sm">{label}</p>
+      <p className="text-base">{label}</p>
     </div>
   )
 }
@@ -29,10 +29,10 @@ export function EmptyState({
   action?: ReactNode
 }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-6 py-16 text-center">
+    <div className="flex flex-col items-center justify-center gap-3 rounded-[1.35rem] border border-dashed border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-6 py-16 text-center">
       <Inbox className="h-10 w-10 text-[var(--color-ink-muted)]" />
-      <h3 className="text-lg font-semibold text-[var(--color-ink)]">{title}</h3>
-      <p className="max-w-md text-sm text-[var(--color-ink-muted)]">{description}</p>
+      <h3 className="section-title">{title}</h3>
+      <p className="body-muted max-w-md">{description}</p>
       {action}
     </div>
   )

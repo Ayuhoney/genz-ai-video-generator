@@ -1,6 +1,5 @@
 import { useMemo, useState, type FormEvent } from 'react'
 import { Link, Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
-import { Clapperboard } from 'lucide-react'
 import { Button } from '../components/Button'
 import { Input } from '../components/FormFields'
 import { useAuthContext } from '../hooks/useAuthContext'
@@ -85,124 +84,148 @@ export function LoginPage({ initialMode = 'login' }: { initialMode?: AuthMode })
   }
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden px-4 py-10">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(15,118,110,0.18),_transparent_45%),radial-gradient(circle_at_bottom_right,_rgba(20,32,26,0.08),_transparent_40%)]" />
-      <div className="relative w-full max-w-md rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] p-6 shadow-lg sm:p-8">
-        <div className="mb-6 flex flex-col items-center text-center">
-          <span className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--color-accent)] text-white">
-            <Clapperboard className="h-6 w-6" />
-          </span>
-          <h1 className="text-2xl font-semibold">
-            {mode === 'login' ? 'Welcome back' : 'Create account'}
+    <div className="app-shell relative flex min-h-screen items-center justify-center overflow-hidden px-4 py-12">
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-[var(--color-accent)]/40 to-transparent" />
+
+      <div className="relative grid w-full max-w-5xl gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:items-center">
+        <div className="anim-rise hidden text-left lg:block">
+          <p className="gc-eyebrow">The cinematic talent network</p>
+          <h1 className="mt-4 font-sans text-4xl font-bold leading-[1.08] tracking-[-0.03em] text-[var(--color-ink)] xl:text-5xl">
+            GENZ CINE
+            <span className="mt-2 block text-[var(--color-accent)]">Cine AI</span>
           </h1>
-          <p className="mt-1 text-sm text-[var(--color-ink-muted)]">
-            {mode === 'login'
-              ? 'Sign in to continue creating AI videos.'
-              : 'Register to start generating videos.'}
+          <p className="body-muted mt-5 max-w-md">
+            From idea to finished film — script, scenes, voice, and render in one
+            premium AI video studio.
+          </p>
+          <div className="mt-8 flex flex-wrap gap-x-6 gap-y-2 text-sm font-semibold uppercase tracking-[0.08em] text-[var(--color-ink-muted)]">
+            <span>Global network</span>
+            <span>Verified craft</span>
+            <span>Instant create</span>
+          </div>
+        </div>
+
+        <div className="anim-rise-delay w-full rounded-[1.35rem] border border-[var(--color-border)] bg-[var(--color-surface-elevated)] p-6 shadow-[0_24px_60px_-36px_rgba(10,10,11,0.35)] sm:p-8">
+          <div className="mb-6 flex flex-col items-start text-left lg:hidden">
+            <p className="gc-eyebrow">Cine AI</p>
+            <h1 className="mt-2 font-sans text-2xl font-bold tracking-[-0.02em] text-[var(--color-ink)]">
+              GENZ CINE
+            </h1>
+          </div>
+
+          <div className="mb-1">
+            <h2 className="font-sans text-2xl font-bold tracking-[-0.02em] text-[var(--color-ink)]">
+              {mode === 'login' ? 'Sign in' : 'Create account'}
+            </h2>
+            <p className="mt-1.5 text-sm leading-relaxed text-[var(--color-ink-muted)]">
+              {mode === 'login'
+                ? 'Sign in to continue creating cinematic AI videos.'
+                : 'Register to start producing with Cine AI.'}
+            </p>
+          </div>
+
+          <div className="mb-5 mt-5 grid grid-cols-2 gap-1 rounded-2xl bg-[var(--color-surface)] p-1">
+            <button
+              type="button"
+              className={`rounded-xl px-3 py-2.5 text-sm font-semibold transition ${
+                mode === 'login'
+                  ? 'bg-[var(--color-surface-elevated)] text-[var(--color-ink)] shadow-sm'
+                  : 'text-[var(--color-ink-muted)]'
+              }`}
+              onClick={() => {
+                setMode('login')
+                setErrors({})
+              }}
+            >
+              Login
+            </button>
+            <button
+              type="button"
+              className={`rounded-xl px-3 py-2.5 text-sm font-semibold transition ${
+                mode === 'register'
+                  ? 'bg-[var(--color-surface-elevated)] text-[var(--color-ink)] shadow-sm'
+                  : 'text-[var(--color-ink-muted)]'
+              }`}
+              onClick={() => {
+                setMode('register')
+                setErrors({})
+              }}
+            >
+              Register
+            </button>
+          </div>
+
+          <form className="space-y-4" onSubmit={onSubmit} noValidate>
+            {mode === 'register' ? (
+              <Input
+                label="Name"
+                name="name"
+                type="text"
+                autoComplete="name"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                error={errors.name}
+                placeholder="Alex Creator"
+              />
+            ) : null}
+            <Input
+              label="Email"
+              name="email"
+              type="email"
+              autoComplete="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              error={errors.email}
+              placeholder="you@example.com"
+            />
+            <Input
+              label="Password"
+              name="password"
+              type="password"
+              autoComplete={
+                mode === 'register' ? 'new-password' : 'current-password'
+              }
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              error={errors.password}
+              placeholder="••••••••"
+            />
+
+            {error ? (
+              <p className="rounded-xl bg-[var(--color-danger-soft)] px-3 py-2 text-sm text-[var(--color-danger)]">
+                {error}
+              </p>
+            ) : null}
+
+            <Button
+              type="submit"
+              className="w-full"
+              size="lg"
+              loading={submitting}
+              disabled={!canSubmit}
+            >
+              {mode === 'login' ? 'Sign in' : 'Create account'}
+            </Button>
+          </form>
+
+          <p className="mt-5 text-center text-sm text-[var(--color-ink-muted)]">
+            {mode === 'login' ? (
+              <>
+                Need an account?{' '}
+                <Link to="/register" className="font-semibold text-[var(--color-accent)]">
+                  Register
+                </Link>
+              </>
+            ) : (
+              <>
+                Already registered?{' '}
+                <Link to="/login" className="font-semibold text-[var(--color-accent)]">
+                  Sign in
+                </Link>
+              </>
+            )}
           </p>
         </div>
-
-        <div className="mb-5 grid grid-cols-2 gap-1 rounded-xl bg-[var(--color-surface)] p-1">
-          <button
-            type="button"
-            className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
-              mode === 'login'
-                ? 'bg-[var(--color-surface-elevated)] text-[var(--color-ink)] shadow-sm'
-                : 'text-[var(--color-ink-muted)]'
-            }`}
-            onClick={() => {
-              setMode('login')
-              setErrors({})
-            }}
-          >
-            Login
-          </button>
-          <button
-            type="button"
-            className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
-              mode === 'register'
-                ? 'bg-[var(--color-surface-elevated)] text-[var(--color-ink)] shadow-sm'
-                : 'text-[var(--color-ink-muted)]'
-            }`}
-            onClick={() => {
-              setMode('register')
-              setErrors({})
-            }}
-          >
-            Register
-          </button>
-        </div>
-
-        <form className="space-y-4" onSubmit={onSubmit} noValidate>
-          {mode === 'register' ? (
-            <Input
-              label="Name"
-              name="name"
-              type="text"
-              autoComplete="name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              error={errors.name}
-              placeholder="Alex Creator"
-            />
-          ) : null}
-          <Input
-            label="Email"
-            name="email"
-            type="email"
-            autoComplete="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            error={errors.email}
-            placeholder="you@example.com"
-          />
-          <Input
-            label="Password"
-            name="password"
-            type="password"
-            autoComplete={
-              mode === 'register' ? 'new-password' : 'current-password'
-            }
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            error={errors.password}
-            placeholder="••••••••"
-          />
-
-          {error ? (
-            <p className="rounded-lg bg-[var(--color-danger-soft)] px-3 py-2 text-sm text-[var(--color-danger)]">
-              {error}
-            </p>
-          ) : null}
-
-          <Button
-            type="submit"
-            className="w-full"
-            size="lg"
-            loading={submitting}
-            disabled={!canSubmit}
-          >
-            {mode === 'login' ? 'Sign in' : 'Create account'}
-          </Button>
-        </form>
-
-        <p className="mt-4 text-center text-xs text-[var(--color-ink-muted)]">
-          {mode === 'login' ? (
-            <>
-              Need an account?{' '}
-              <Link to="/register" className="text-[var(--color-accent)]">
-                Register
-              </Link>
-            </>
-          ) : (
-            <>
-              Already registered?{' '}
-              <Link to="/login" className="text-[var(--color-accent)]">
-                Sign in
-              </Link>
-            </>
-          )}
-        </p>
       </div>
     </div>
   )

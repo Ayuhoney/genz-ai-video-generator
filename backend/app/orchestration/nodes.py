@@ -82,11 +82,18 @@ def mock_shots(
         return shots
 
     shots = []
+    from app.providers.fal.clip_timing import clamp_clip_seconds, clip_seconds_from_settings
+
+    try:
+        from app.core.config import get_settings
+
+        clip = clip_seconds_from_settings(get_settings())
+    except Exception:
+        clip = 15
     for scene in scenes:
-        # Split long scenes into short shots so clip length ≈ shot duration.
-        shot_count = 2
-        scene_dur = float(scene.get("duration_seconds") or 10)
-        per_shot = max(1.0, round(scene_dur / shot_count, 2))
+        # One fal clip per shot — never longer than WAN max (~15s).
+        scene_dur = float(scene.get("duration_seconds") or clip)
+        shot_count = max(1, int(round(scene_dur / clip)))
         for index in range(1, shot_count + 1):
             shots.append(
                 {
@@ -94,12 +101,16 @@ def mock_shots(
                     "scene_id": scene["id"],
                     "order": index,
                     "title": f"{scene['title']} / Shot {index}",
-                    "description": f"Mock shot {index} for {scene['id']}",
+                    "description": soft_desc(scene),
                     "status": "pending",
-                    "duration_seconds": per_shot,
+                    "duration_seconds": float(clamp_clip_seconds(clip)),
                 }
             )
     return shots
+
+
+def soft_desc(scene: dict[str, Any]) -> str:
+    return str(scene.get("description") or scene.get("title") or scene["id"])
 
 
 def _status_map(
@@ -222,17 +233,32 @@ def process_scene_items(
 
 def director_planning(state: WorkflowState) -> WorkflowState:
     from app.orchestration.director_ai import (
-        gemini_enabled,
+        groq_enabled,
         load_project_story,
-        plan_with_gemini,
+        plan_with_groq,
     )
+    from app.workers.project_context import load_director_plan_for_production
 
-    # Keep regenerates on existing plan; fresh Gemini only when starting (no scenes yet)
-    # or when director_provider=gemini and no completed scenes.
-    if gemini_enabled() and not (state.get("scenes") or []):
+    # Prefer the user-confirmed AI Director plan saved on the project.
+    saved = load_director_plan_for_production(state["project_id"])
+    if saved is not None:
+        plan, scenes, shots = saved
+        return {
+            "director_plan": plan,
+            "scenes": scenes,
+            "shots": shots,
+            "scene_status": _status_map(scenes),
+            "shot_status": _status_map(shots),
+            "current_step": "director_planning",
+            "status": "running",
+            "pause_reason": "",
+        }
+
+    # Keep regenerates on existing plan; fresh Groq only when starting (no scenes yet).
+    if groq_enabled() and not (state.get("scenes") or []):
         meta = load_project_story(state["project_id"])
         try:
-            plan, scenes, shots = plan_with_gemini(
+            plan, scenes, shots = plan_with_groq(
                 project_id=state["project_id"],
                 story=meta["story"],
                 language=meta["language"],
@@ -272,7 +298,7 @@ def director_planning(state: WorkflowState) -> WorkflowState:
 
 
 def scene_planning(state: WorkflowState) -> WorkflowState:
-    # Gemini already filled scenes in director_planning — skip remock unless regenerating.
+    # Groq already filled scenes in director_planning — skip remock unless regenerating.
     existing = state.get("scenes") or []
     regen = state.get("regenerate_scene_ids") or []
     if existing and not regen:

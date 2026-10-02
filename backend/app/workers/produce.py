@@ -25,11 +25,13 @@ from app.storage.asset_store import (
 )
 from app.media.ffprobe import probe_duration_seconds, suffix_for_mime
 from app.providers.sarvam.audio import language_to_sarvam_code
+from app.providers.fal.clip_timing import clamp_clip_seconds, soft_visual_prompt
 from app.workers import job_store
 from app.workers.project_context import (
     build_music_prompt,
     build_sfx_prompt,
     get_project_doc,
+    locked_character_refs,
     scene_script_from_graph,
 )
 
@@ -54,6 +56,55 @@ def _settings():
         from app.workers.settings import get_worker_settings
 
         return get_worker_settings()
+
+
+def _reuse_existing_asset(
+    *,
+    project_id: str,
+    asset_type: str,
+    scene_id: str | None,
+    shot_id: str | None,
+) -> dict[str, Any] | None:
+    """If this scene/shot already has a saved asset on disk, skip fal and reuse it."""
+    db = get_sync_db_from_settings()
+    assets = list_assets_for_project(db, project_id)
+    matches = [
+        a
+        for a in assets
+        if a.get("type") == asset_type
+        and (scene_id is None or a.get("scene_id") == scene_id)
+        and (
+            shot_id is None
+            or not shot_id
+            or a.get("shot_id") == shot_id
+            or (asset_type == "image" and not a.get("shot_id"))
+        )
+    ]
+    if not matches:
+        return None
+    asset = matches[-1]
+    key = str(asset.get("r2_key") or "")
+    if not key:
+        return None
+    storage = get_storage()
+    try:
+        if not storage.exists(key):
+            return None
+    except Exception:
+        return None
+    return {
+        "type": asset_type,
+        "reused": True,
+        "output_key": key,
+        "r2_key": key,
+        "asset_id": asset.get("id"),
+        "mime": asset.get("mime"),
+        "size": asset.get("size"),
+        "cost": 0.0,
+        "provider": "reuse",
+        "duration": asset.get("duration"),
+        "tmp_cleaned": True,
+    }
 
 
 def set_project_paused_budget(db: Any, project_id: str) -> None:
@@ -194,15 +245,34 @@ def _scene_image_for_i2v(
 
 def produce_image(job: dict[str, Any]) -> dict[str, Any]:
     enforce_budget(job["project_id"])
+    reused = _reuse_existing_asset(
+        project_id=job["project_id"],
+        asset_type="image",
+        scene_id=job.get("scene_id"),
+        shot_id=job.get("shot_id"),
+    )
+    if reused:
+        return reused
     inp = job.get("input") or {}
     scene_id = job.get("scene_id")
     script = scene_script_from_graph(job["project_id"], scene_id)
-    prompt = str(
-        inp.get("prompt")
-        or script
-        or inp.get("kind")
-        or "cinematic film still, dramatic lighting, 16:9, no text"
+    prompt = soft_visual_prompt(
+        str(
+            inp.get("prompt")
+            or script
+            or inp.get("kind")
+            or "cinematic film still, dramatic lighting, 16:9, no text"
+        )
     )
+    refs = locked_character_refs(job["project_id"])
+    if refs:
+        looks = "; ".join(
+            f"{r['name']}: {r['description']}" for r in refs if r.get("description")
+        )
+        prompt = (
+            f"{prompt}. FACE LOCK — same identity every shot for: {looks}. "
+            "Do not change face, age, or hairstyle."
+        )
     result = get_registry().generate_image(
         ImageRequest(
             project_id=job["project_id"],
@@ -210,22 +280,36 @@ def produce_image(job: dict[str, Any]) -> dict[str, Any]:
             prompt=prompt,
             width=1280,
             height=720,
+            reference_image_urls=[r["url"] for r in refs if r.get("url")],
         )
     )
     return _record_and_upload(job=job, result=result, asset_type="image")
 
 
 def produce_video(job: dict[str, Any]) -> dict[str, Any]:
-    """Image-to-video: scene still → clip; duration matches shot length."""
+    """Image-to-video: scene still → clip; duration clamped to fal WAN max (~15s)."""
     enforce_budget(job["project_id"])
+    reused = _reuse_existing_asset(
+        project_id=job["project_id"],
+        asset_type="video",
+        scene_id=job.get("scene_id"),
+        shot_id=job.get("shot_id"),
+    )
+    if reused:
+        return reused
     inp = job.get("input") or {}
-    duration = float(inp.get("duration_seconds") or 5)
+    settings = _settings()
+    duration = float(
+        clamp_clip_seconds(
+            inp.get("duration_seconds"),
+            default=int(getattr(settings, "fal_video_clip_seconds", None) or 15),
+        )
+    )
     image_bytes, image_mime, image_url = _scene_image_for_i2v(
         job["project_id"],
         job.get("scene_id"),
     )
     extra: dict[str, Any] = {}
-    settings = _settings()
     res = getattr(settings, "fal_video_resolution", None)
     if res:
         extra["resolution"] = res
@@ -234,7 +318,9 @@ def produce_video(job: dict[str, Any]) -> dict[str, Any]:
             project_id=job["project_id"],
             scene_id=job.get("scene_id"),
             shot_id=job.get("shot_id"),
-            prompt=str(inp.get("prompt") or job.get("shot_id") or "shot motion"),
+            prompt=soft_visual_prompt(
+                str(inp.get("prompt") or job.get("shot_id") or "subtle camera motion")
+            ),
             duration_seconds=duration,
             image_url=image_url,
             image_bytes=image_bytes,

@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import assets, auth, director, internal, production, projects
+from app.api import assets, auth, billing, director, internal, production, projects, uploads
 from app.core.config import get_settings
 from app.db.mongodb import close_mongo_connection, connect_to_mongo
 from app.film_studio import router as film_studio_router
@@ -49,6 +49,8 @@ def create_app() -> FastAPI:
     app.include_router(production.router)
     app.include_router(assets.router)
     app.include_router(internal.router)
+    app.include_router(billing.router)
+    app.include_router(uploads.router)
     app.include_router(film_studio_router, prefix="/studio")
 
     @app.get("/api/health")

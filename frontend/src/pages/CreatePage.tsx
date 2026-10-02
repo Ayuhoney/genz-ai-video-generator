@@ -2,6 +2,7 @@ import { RefreshCw, Sparkles, Wand2 } from 'lucide-react'
 import { useMemo, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '../components/Button'
+import { CharacterLockCard } from '../components/CharacterLockCard'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { Input, Select, Textarea } from '../components/FormFields'
 import { ErrorState, Skeleton } from '../components/States'
@@ -15,7 +16,7 @@ import {
   generateDirectorResponse,
 } from '../services/api'
 import { formatDuration } from '../services/utils'
-import type { DirectorResponse } from '../types'
+import type { Character, DirectorResponse } from '../types'
 
 interface FormState {
   idea: string
@@ -107,6 +108,20 @@ export function CreatePage() {
     })
   }
 
+  const updateCharacter = (characterId: string, patch: Partial<Character>) => {
+    setDirector((prev) => {
+      if (!prev) {
+        return prev
+      }
+      return {
+        ...prev,
+        characters: prev.characters.map((character) =>
+          character.id === characterId ? { ...character, ...patch } : character,
+        ),
+      }
+    })
+  }
+
   const onConfirmProduction = async () => {
     if (!director) {
       return
@@ -128,19 +143,19 @@ export function CreatePage() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-          Create Video
-        </h1>
-        <p className="mt-1 text-sm text-[var(--color-ink-muted)]">
+      <div className="anim-rise">
+        <p className="gc-eyebrow">Cine AI director</p>
+        <h1 className="page-title mt-2">Create Video</h1>
+        <p className="body-muted mt-3 max-w-xl">
           Share an idea. The AI Director drafts concept, characters, and scenes
-          for review.
+          for a quick review. Total length can be minutes — each fal video clip
+          is up to 15 seconds, then clips are stitched together.
         </p>
       </div>
 
       <form
         onSubmit={onSubmit}
-        className="space-y-5 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] p-5 sm:p-6"
+        className="anim-rise-delay space-y-5 rounded-[1.35rem] border border-[var(--color-border)] bg-[var(--color-surface-elevated)] p-5 sm:p-7"
       >
         <Textarea
           label="Video idea"
@@ -155,8 +170,8 @@ export function CreatePage() {
 
         <div className="space-y-3">
           <div className="flex items-center justify-between gap-3">
-            <span className="text-sm font-medium">Duration</span>
-            <span className="text-sm text-[var(--color-ink-muted)]">
+            <span className="label-text">Duration</span>
+            <span className="text-base font-semibold text-[var(--color-ink)]">
               {estimatedLabel}
             </span>
           </div>
@@ -186,10 +201,10 @@ export function CreatePage() {
                     durationSeconds: preset.seconds,
                   }))
                 }
-                className={`rounded-lg px-3 py-1.5 text-sm transition ${
+                className={`rounded-xl px-4 py-2 text-sm font-semibold transition ${
                   form.durationSeconds === preset.seconds
                     ? 'bg-[var(--color-accent)] text-white'
-                    : 'border border-[var(--color-border)] text-[var(--color-ink-muted)] hover:bg-[var(--color-accent-soft)]'
+                    : 'border border-[var(--color-border)] text-[var(--color-ink-muted)] hover:border-[var(--color-ink)]/25 hover:text-[var(--color-ink)]'
                 }`}
               >
                 {preset.label}
@@ -268,12 +283,15 @@ export function CreatePage() {
       ) : null}
 
       {!generating && director ? (
-        <section className="space-y-5 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] p-5 sm:p-6">
+        <section className="anim-fade space-y-8 rounded-[1.35rem] border border-[var(--color-border)] bg-[var(--color-surface-elevated)] p-5 sm:p-7">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <h2 className="text-xl font-semibold">Director response</h2>
-            <p className="text-sm text-[var(--color-ink-muted)]">
+            <div>
+              <p className="gc-eyebrow">AI Director</p>
+              <h2 className="section-title mt-1">Production plan</h2>
+            </div>
+            <p className="text-base text-[var(--color-ink-muted)]">
               Estimated total:{' '}
-              <span className="font-medium text-[var(--color-ink)]">
+              <span className="font-semibold text-[var(--color-ink)]">
                 {formatDuration(director.estimatedDurationSeconds)}
               </span>
             </p>
@@ -302,32 +320,46 @@ export function CreatePage() {
           />
 
           <div>
-            <h3 className="mb-2 text-sm font-medium">Characters</h3>
-            <ul className="grid gap-3 sm:grid-cols-2">
+            <h3 className="section-title">1 · Director script</h3>
+            <p className="meta-text mt-1">
+              Full screenplay from the AI Director — edit before production.
+            </p>
+            <textarea
+              className="mt-3 min-h-48 w-full resize-y rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 font-mono text-sm leading-relaxed outline-none focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/15 sm:text-[0.9375rem]"
+              value={director.script || ''}
+              onChange={(event) =>
+                setDirector((prev) =>
+                  prev ? { ...prev, script: event.target.value } : prev,
+                )
+              }
+              aria-label="Director script"
+            />
+          </div>
+
+          <div>
+            <h3 className="section-title">2 · Character face lock</h3>
+            <p className="meta-text mt-1">
+              Drag & drop actress / model photos so the same face is used in every
+              scene.
+            </p>
+            <ul className="mt-3 grid gap-3 lg:grid-cols-2">
               {director.characters.map((character) => (
-                <li
+                <CharacterLockCard
                   key={character.id}
-                  className="rounded-xl border border-[var(--color-border)] p-3"
-                >
-                  <div className="font-medium">{character.name}</div>
-                  <div className="text-xs uppercase tracking-wide text-[var(--color-ink-muted)]">
-                    {character.role}
-                  </div>
-                  <p className="mt-1 text-sm text-[var(--color-ink-muted)]">
-                    {character.description}
-                  </p>
-                </li>
+                  character={character}
+                  onChange={(patch) => updateCharacter(character.id, patch)}
+                />
               ))}
             </ul>
           </div>
 
           <div>
-            <h3 className="mb-2 text-sm font-medium">Story structure</h3>
+            <h3 className="section-title mb-2">Story structure</h3>
             <ol className="space-y-2">
               {director.storyStructure.map((beat, index) => (
                 <li
                   key={`${beat}-${index}`}
-                  className="rounded-lg bg-[var(--color-accent-soft)]/50 px-3 py-2 text-sm"
+                  className="rounded-xl bg-[var(--color-accent-soft)]/60 px-3.5 py-2.5 text-base"
                 >
                   <span className="mr-2 font-semibold text-[var(--color-accent)]">
                     {index + 1}.
@@ -339,23 +371,26 @@ export function CreatePage() {
           </div>
 
           <div>
-            <h3 className="mb-2 text-sm font-medium">Scene breakdown</h3>
-            <ul className="space-y-3">
+            <h3 className="section-title">3 · Scenes, shots & voice</h3>
+            <p className="meta-text mt-1">
+              Each scene shows planned shots and voice lines that will be generated.
+            </p>
+            <ul className="mt-3 space-y-4">
               {director.scenes.map((scene) => (
                 <li
                   key={scene.id}
-                  className="rounded-xl border border-[var(--color-border)] p-3"
+                  className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
                 >
                   <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-xs font-medium uppercase tracking-wide text-[var(--color-ink-muted)]">
+                    <span className="text-sm font-bold uppercase tracking-wide text-[var(--color-ink-muted)]">
                       Scene {scene.order}
                     </span>
-                    <span className="text-xs text-[var(--color-ink-muted)]">
+                    <span className="text-sm font-semibold text-[var(--color-ink-muted)]">
                       {formatDuration(scene.durationSeconds)}
                     </span>
                   </div>
                   <input
-                    className="mb-2 w-full rounded-lg border border-[var(--color-border)] bg-transparent px-3 py-2 text-sm font-medium outline-none focus:border-[var(--color-accent)]"
+                    className="mb-2 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-4 py-3 text-base font-semibold outline-none focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/15"
                     value={scene.title}
                     onChange={(event) =>
                       updateScene(scene.id, { title: event.target.value })
@@ -363,8 +398,8 @@ export function CreatePage() {
                     aria-label={`Scene ${scene.order} title`}
                   />
                   <textarea
-                    className="w-full resize-y rounded-lg border border-[var(--color-border)] bg-transparent px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
-                    rows={3}
+                    className="w-full resize-y rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-4 py-3 text-base outline-none focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/15"
+                    rows={2}
                     value={scene.description}
                     onChange={(event) =>
                       updateScene(scene.id, {
@@ -373,6 +408,66 @@ export function CreatePage() {
                     }
                     aria-label={`Scene ${scene.order} description`}
                   />
+
+                  {scene.sfxNotes ? (
+                    <p className="meta-text mt-2">
+                      <span className="font-semibold text-[var(--color-ink)]">SFX:</span>{' '}
+                      {scene.sfxNotes}
+                    </p>
+                  ) : null}
+
+                  {(scene.shots?.length ?? 0) > 0 ? (
+                    <div className="mt-3">
+                      <p className="mb-1.5 text-sm font-bold uppercase tracking-wide text-[var(--color-accent)]">
+                        Shots
+                      </p>
+                      <ul className="space-y-1.5">
+                        {scene.shots?.map((shot) => (
+                          <li
+                            key={shot.id}
+                            className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3.5 py-2.5 text-base"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-semibold">
+                                {shot.order}. {shot.title}
+                              </span>
+                              <span className="meta-text">
+                                {formatDuration(shot.durationSeconds)}
+                                {shot.camera ? ` · ${shot.camera}` : ''}
+                              </span>
+                            </div>
+                            <p className="meta-text mt-0.5">
+                              {shot.description}
+                            </p>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+
+                  {(scene.voiceOver?.length ?? 0) > 0 ? (
+                    <div className="mt-3">
+                      <p className="mb-1.5 text-sm font-bold uppercase tracking-wide text-[var(--color-accent)]">
+                        Voice / dialogue
+                      </p>
+                      <ul className="space-y-1.5">
+                        {scene.voiceOver?.map((line) => (
+                          <li
+                            key={line.id}
+                            className="rounded-xl bg-[var(--color-accent-soft)]/50 px-3.5 py-2.5 text-base"
+                          >
+                            <span className="font-semibold text-[var(--color-accent)]">
+                              {line.characterName}:
+                            </span>{' '}
+                            <span className="text-[var(--color-ink)]">“{line.text}”</span>
+                            <span className="meta-text ml-2">
+                              (~{line.estimatedSeconds}s)
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -398,7 +493,7 @@ export function CreatePage() {
       <ConfirmModal
         open={confirmOpen}
         title="Start production?"
-        description="This will lock the current script plan and begin the mock production pipeline."
+        description="This locks the script, face locks, shots, and voice plan — then starts generation."
         confirmLabel="Start production"
         loading={confirming}
         onClose={() => {
@@ -422,6 +517,12 @@ export function CreatePage() {
               {director
                 ? formatDuration(director.estimatedDurationSeconds)
                 : '—'}
+            </strong>
+            <br />
+            Face locks:{' '}
+            <strong className="text-[var(--color-ink)]">
+              {director?.characters.filter((c) => Boolean(c.referenceImageUrl))
+                .length ?? 0}
             </strong>
           </p>
         )}

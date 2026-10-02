@@ -6,6 +6,7 @@ import type {
   AuthTokenResponse,
   CreateDirectorRequest,
   DirectorResponse,
+  FalCredits,
   LoginCredentials,
   ProductionStage,
   Project,
@@ -99,26 +100,62 @@ export async function generateDirectorResponse(
   })
 }
 
+export async function uploadCharacterRef(
+  file: File,
+): Promise<{ url: string; key: string; faceLocked: boolean }> {
+  const body = new FormData()
+  body.append('file', file)
+  return apiRequest('/api/uploads/character-ref', {
+    method: 'POST',
+    body,
+  })
+}
+
+export async function getFalCredits(): Promise<FalCredits> {
+  return apiRequest<FalCredits>('/api/billing/fal-credits')
+}
+
+export async function startProduction(
+  projectId: string,
+): Promise<{ projectId?: string; status: string; message?: string }> {
+  return apiRequest(`/api/projects/${projectId}/production/start`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+}
+
 export async function confirmProduction(
   draft: DirectorResponse,
   meta: Omit<CreateDirectorRequest, 'idea'> & { idea: string },
   existingProjectId?: string,
 ): Promise<Project> {
+  // Face lock is only true when a reference image exists.
+  const normalized: DirectorResponse = {
+    ...draft,
+    characters: draft.characters.map((character) => ({
+      ...character,
+      faceLocked: Boolean(character.referenceImageUrl),
+      referenceImageUrl: character.referenceImageUrl ?? null,
+    })),
+  }
+
   const payload: ProjectCreatePayload = {
-    title: draft.title,
-    durationSeconds: draft.estimatedDurationSeconds,
+    title: normalized.title,
+    durationSeconds: normalized.estimatedDurationSeconds,
     language: meta.language,
     genre: meta.genre,
     idea: meta.idea,
-    concept: draft.concept,
+    concept: normalized.concept,
     status: 'confirmed',
-    directorResponse: draft,
+    directorResponse: normalized,
   }
 
   const project = existingProjectId
     ? await updateProject(existingProjectId, payload)
     : await createProject(payload)
 
+  // Confirm & Start Production — kick off the graph with the saved plan.
+  await startProduction(project.id)
   return project
 }
 

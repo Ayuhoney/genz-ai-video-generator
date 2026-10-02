@@ -48,6 +48,7 @@ async def test_director_generate_mock_shape(
     body = response.json()
     assert isinstance(body["title"], str) and body["title"]
     assert isinstance(body["concept"], str) and body["concept"]
+    assert isinstance(body.get("script"), str)
     assert isinstance(body["characters"], list) and len(body["characters"]) >= 1
     assert isinstance(body["storyStructure"], list) and len(body["storyStructure"]) >= 1
     assert isinstance(body["scenes"], list) and len(body["scenes"]) >= 1
@@ -60,6 +61,8 @@ async def test_director_generate_mock_shape(
     assert "description" in scene
     assert "durationSeconds" in scene
     assert scene["status"] in {"pending", "running", "completed", "failed"}
+    assert isinstance(scene.get("shots"), list)
+    assert isinstance(scene.get("voiceOver"), list)
 
     invalid = await client.post(
         "/api/director/generate",

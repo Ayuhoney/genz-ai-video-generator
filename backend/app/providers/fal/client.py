@@ -200,6 +200,20 @@ class FalClient:
             )
         return response.content
 
+    def get_account_billing(self) -> dict[str, Any]:
+        """GET https://api.fal.ai/v1/account/billing?expand=credits"""
+        response = self._client.get(
+            "https://api.fal.ai/v1/account/billing",
+            headers=self._headers(),
+            params={"expand": "credits"},
+        )
+        if response.status_code >= 400:
+            raise FalAPIError(
+                f"fal billing failed ({response.status_code}): {response.text[:400]}",
+                status_code=response.status_code,
+            )
+        return response.json()
+
 
 def extract_image_url(result: dict[str, Any]) -> str:
     images = result.get("images")

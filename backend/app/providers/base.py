@@ -33,6 +33,7 @@ class ImageRequest:
     prompt: str = ""
     width: int = 512
     height: int = 512
+    reference_image_urls: list[str] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
 
 

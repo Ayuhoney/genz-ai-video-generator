@@ -167,20 +167,19 @@ export function ProjectPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-col gap-4">
+      <div className="anim-rise flex flex-col gap-4">
         <Link
           to="/dashboard"
-          className="inline-flex w-fit items-center gap-2 text-sm text-[var(--color-ink-muted)] hover:text-[var(--color-ink)]"
+          className="inline-flex w-fit items-center gap-2 text-sm font-medium text-[var(--color-ink-muted)] transition hover:text-[var(--color-accent)]"
         >
           <ArrowLeft className="h-4 w-4" />
           Back to dashboard
         </Link>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-              {project.title}
-            </h1>
-            <p className="mt-1 text-sm text-[var(--color-ink-muted)]">
+            <p className="gc-eyebrow">Production</p>
+            <h1 className="page-title mt-1">{project.title}</h1>
+            <p className="meta-text mt-2">
               {formatDuration(project.durationSeconds)} · Created{' '}
               {formatDate(project.createdAt)} · {project.language} ·{' '}
               {project.genre}
@@ -202,7 +201,7 @@ export function ProjectPage() {
           />
         </div>
         {project.concept || project.idea ? (
-          <p className="max-w-3xl text-sm text-[var(--color-ink-muted)]">
+          <p className="body-muted max-w-3xl">
             {project.concept ?? project.idea}
           </p>
         ) : null}
@@ -213,9 +212,9 @@ export function ProjectPage() {
       ) : null}
 
       {finalVideoUrl ? (
-        <section className="space-y-3">
-          <h2 className="text-lg font-semibold">Final video</h2>
-          <div className="overflow-hidden rounded-2xl border border-[var(--color-border)] bg-black">
+        <section className="anim-fade space-y-3">
+          <h2 className="section-title">Final video</h2>
+          <div className="overflow-hidden rounded-[1.35rem] border border-[var(--color-border)] bg-black">
             <video
               className="aspect-video w-full"
               src={finalVideoUrl}
@@ -226,7 +225,7 @@ export function ProjectPage() {
           <a
             href={finalVideoUrl}
             download
-            className="inline-flex items-center justify-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-4 py-2 text-sm font-medium hover:bg-[var(--color-accent-soft)]"
+            className="inline-flex items-center justify-center rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-4 py-2.5 text-sm font-semibold hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
           >
             Download MP4
           </a>
@@ -234,16 +233,16 @@ export function ProjectPage() {
       ) : null}
 
       <section className="space-y-4">
-        <h2 className="text-lg font-semibold">Production pipeline</h2>
+        <h2 className="section-title">Production pipeline</h2>
         <div className="overflow-x-auto pb-2">
           <ol className="flex min-w-max gap-3">
             {stages.map((stage, index) => (
               <li
                 key={stage.id}
-                className="w-44 shrink-0 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] p-4"
+                className="w-44 shrink-0 rounded-[1.25rem] border border-[var(--color-border)] bg-[var(--color-surface-elevated)] p-4"
               >
                 <div className="mb-3 flex items-center justify-between gap-2">
-                  <span className="text-xs font-medium uppercase tracking-wide text-[var(--color-ink-muted)]">
+                  <span className="text-sm font-bold uppercase tracking-wide text-[var(--color-ink-muted)]">
                     {index + 1}. {stage.label}
                   </span>
                 </div>
@@ -251,7 +250,7 @@ export function ProjectPage() {
                   <StatusBadge status={stage.status} />
                 </div>
                 <ProgressBar value={stage.progress} status={stage.status} />
-                <p className="mt-2 text-xs text-[var(--color-ink-muted)]">
+                <p className="meta-text mt-2">
                   {stage.progress}%
                 </p>
                 {stage.status === 'failed' ? (
@@ -273,7 +272,7 @@ export function ProjectPage() {
       </section>
 
       <section className="space-y-4">
-        <h2 className="text-lg font-semibold">Scenes</h2>
+        <h2 className="section-title">Scenes</h2>
         {scenes.length === 0 ? (
           <EmptyState
             title="No scenes yet"
@@ -297,7 +296,7 @@ export function ProjectPage() {
                     <p className="text-sm text-[var(--color-ink-muted)]">
                       {scene.description}
                     </p>
-                    <p className="mt-2 text-xs text-[var(--color-ink-muted)]">
+                    <p className="meta-text mt-2">
                       {formatDuration(scene.durationSeconds)}
                     </p>
                   </div>
