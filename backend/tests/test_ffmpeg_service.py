@@ -71,6 +71,33 @@ def test_render_scene_video_only_gets_silent_audio(tmp_path: Path) -> None:
     validate_final_output(out, expected_duration=duration, tolerance_seconds=1.0)
 
 
+def test_render_scene_pads_short_clip_to_plan(tmp_path: Path) -> None:
+    """Short generator clips (e.g. fal turbo ~0.4s) must stretch to plan length."""
+    shot = tmp_path / "shot.mp4"
+    write_tiny_video_mp4(shot, duration=0.4)
+    narr = tmp_path / "narr.wav"
+    write_tiny_audio_wav(narr, duration=0.25)
+
+    out = tmp_path / "scene.mp4"
+    duration = render_scene_video(
+        work_dir=tmp_path / "work",
+        inputs=SceneInputs(
+            shot_clips=[shot],
+            narration=narr,
+            target_duration=1.2,
+            shot_target_durations=[1.2],
+        ),
+        output_path=out,
+        width=320,
+        height=180,
+        fps=12,
+        fade_seconds=0.05,
+    )
+    assert out.is_file()
+    assert abs(duration - 1.2) < 0.35
+    validate_final_output(out, expected_duration=1.2, tolerance_seconds=0.4)
+
+
 def test_assemble_and_validate_final(tmp_path: Path) -> None:
     scenes: list[Path] = []
     for index in range(2):

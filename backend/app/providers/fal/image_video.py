@@ -209,6 +209,8 @@ class FalVideoProvider(VideoProvider):
                 "model": model,
                 "image_url": image_url,
                 "requested_duration": duration,
+                "requested_duration_seconds": duration,
+                "planned_duration_seconds": duration,
                 "fal_args": {
                     k: arguments.get(k)
                     for k in (
@@ -216,6 +218,7 @@ class FalVideoProvider(VideoProvider):
                         "frames_per_second",
                         "num_interpolated_frames",
                         "duration",
+                        "resolution",
                     )
                     if k in arguments
                 },

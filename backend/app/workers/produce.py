@@ -144,14 +144,25 @@ def _record_and_upload(
     storage = get_storage()
     db = get_sync_db_from_settings()
     data = result.require_bytes()
-    if asset_type in {"tts", "sfx", "music"}:
+    if asset_type in {"tts", "sfx", "music", "video"}:
         probed = probe_duration_seconds(
             data,
             suffix=suffix_for_mime(result.mime_type),
         )
         if probed is not None:
-            result.duration_seconds = probed
-            result.metadata = {**result.metadata, "duration_ffprobe": probed}
+            if asset_type == "video":
+                planned = float(result.duration_seconds or 0.0)
+                result.metadata = {
+                    **result.metadata,
+                    "duration_ffprobe": probed,
+                    "actual_duration_seconds": probed,
+                    "planned_duration_seconds": planned or probed,
+                    "requested_duration_seconds": planned or probed,
+                }
+                # Keep planned length on the asset for scene timing; actual is in metadata.
+            else:
+                result.duration_seconds = probed
+                result.metadata = {**result.metadata, "duration_ffprobe": probed}
     filename = f"{job['id']}_{result.filename}"
     key = build_r2_key(
         project_id=job["project_id"],

@@ -108,6 +108,26 @@ def _upload_video_output(
     }
 
 
+def _shot_plan_seconds(asset: dict[str, Any], fallback: float) -> float:
+    """Planned shot length from metadata — never use probed fal clip length."""
+    meta = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+    for key in (
+        "planned_duration_seconds",
+        "requested_duration_seconds",
+        "requested_duration",
+        "plan_duration_seconds",
+        "duration_seconds",
+    ):
+        raw = meta.get(key)
+        try:
+            value = float(raw) if raw is not None else 0.0
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0:
+            return value
+    return max(0.1, float(fallback))
+
+
 def render_scene_for_job(job: dict[str, Any]) -> dict[str, Any]:
     scene_id = job.get("scene_id")
     if not scene_id:
@@ -118,13 +138,26 @@ def render_scene_for_job(job: dict[str, Any]) -> dict[str, Any]:
     if not bundle["shots"]:
         raise ValueError(f"No shot videos found for scene {scene_id}")
 
+    inp = job.get("input") or {}
+    scene_plan = float(inp.get("duration_seconds") or 0) or None
+
     tmp_root = Path(tempfile.mkdtemp(prefix=f"scene-{scene_id[:8]}-"))
     try:
         shot_paths: list[Path] = []
+        shot_plans: list[float] = []
+        default_each = (
+            (scene_plan / len(bundle["shots"])) if scene_plan else 5.0
+        )
         for index, asset in enumerate(bundle["shots"]):
             shot_paths.append(
                 _download_asset(storage, asset, tmp_root / f"shot_{index}.mp4")
             )
+            shot_plans.append(_shot_plan_seconds(asset, default_each))
+
+        # Scene plan wins; else sum of per-shot plans (covers multi-shot scenes).
+        if scene_plan is None or scene_plan <= 0:
+            scene_plan = sum(shot_plans)
+
         narration = (
             _download_asset(storage, bundle["tts"], tmp_root / "narration.mp3")
             if bundle["tts"]
@@ -140,7 +173,6 @@ def render_scene_for_job(job: dict[str, Any]) -> dict[str, Any]:
             if bundle["music"]
             else None
         )
-        target = float((job.get("input") or {}).get("duration_seconds") or 0) or None
         out = tmp_root / "scene.mp4"
         duration = render_scene_video(
             work_dir=tmp_root / "work",
@@ -149,7 +181,8 @@ def render_scene_for_job(job: dict[str, Any]) -> dict[str, Any]:
                 narration=narration,
                 sfx=sfx,
                 music=music,
-                target_duration=target,
+                target_duration=float(scene_plan),
+                shot_target_durations=shot_plans,
             ),
             output_path=out,
             width=settings.ffmpeg_width,
@@ -163,7 +196,12 @@ def render_scene_for_job(job: dict[str, Any]) -> dict[str, Any]:
             asset_type="scene_render",
             filename="scene.mp4",
             duration=duration,
-            metadata={"scene_id": scene_id, "ffmpeg": True},
+            metadata={
+                "scene_id": scene_id,
+                "ffmpeg": True,
+                "planned_duration_seconds": float(scene_plan),
+                "shot_planned_durations": shot_plans,
+            },
         )
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
