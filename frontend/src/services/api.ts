@@ -68,6 +68,77 @@ export async function getFinalVideoUrl(
   )
 }
 
+export interface ProjectAsset {
+  id: string
+  type: string
+  sceneId?: string | null
+  shotId?: string | null
+  r2Key?: string
+  mime?: string | null
+  duration?: number | null
+  provider?: string | null
+  metadata?: Record<string, unknown>
+}
+
+export async function listProjectAssets(
+  projectId: string,
+): Promise<{ projectId: string; assets: ProjectAsset[] }> {
+  const raw = await apiRequest<{
+    projectId: string
+    assets: Array<Record<string, unknown>>
+  }>(`/api/projects/${projectId}/assets`)
+  return {
+    projectId: raw.projectId,
+    assets: (raw.assets || []).map((a) => ({
+      id: String(a.id ?? ''),
+      type: String(a.type ?? ''),
+      sceneId: (a.scene_id ?? a.sceneId ?? null) as string | null,
+      shotId: (a.shot_id ?? a.shotId ?? null) as string | null,
+      r2Key: a.r2_key ? String(a.r2_key) : a.r2Key ? String(a.r2Key) : undefined,
+      mime: (a.mime as string | null | undefined) ?? null,
+      duration:
+        typeof a.duration === 'number'
+          ? a.duration
+          : a.duration != null
+            ? Number(a.duration)
+            : null,
+      provider: (a.provider as string | null | undefined) ?? null,
+      metadata:
+        a.metadata && typeof a.metadata === 'object'
+          ? (a.metadata as Record<string, unknown>)
+          : undefined,
+    })),
+  }
+}
+
+export async function getAssetSignedUrl(
+  projectId: string,
+  assetId: string,
+): Promise<SignedAssetUrl> {
+  return apiRequest<SignedAssetUrl>(
+    `/api/projects/${projectId}/assets/${assetId}/url`,
+  )
+}
+
+export async function regenerateProduction(
+  projectId: string,
+  payload: { sceneIds?: string[]; shotIds?: string[] },
+): Promise<{
+  projectId: string
+  status: string
+  message: string
+  sceneIds: string[]
+  shotIds: string[]
+}> {
+  return apiRequest(`/api/projects/${projectId}/production/regenerate`, {
+    method: 'POST',
+    body: JSON.stringify({
+      sceneIds: payload.sceneIds ?? [],
+      shotIds: payload.shotIds ?? [],
+    }),
+  })
+}
+
 export async function createProject(
   payload: ProjectCreatePayload,
 ): Promise<Project> {

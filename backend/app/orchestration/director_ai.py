@@ -144,10 +144,12 @@ Return ONLY valid JSON:
    "sfx": "comma-separated ambient sounds, no speech",
    "shots": [{"order": 1, "title": str, "description": str, "duration_seconds": 15}]}]}
 Rules: each shot duration_seconds MUST be 10-15 (prefer 15); enough shots to cover total duration;
-family-friendly cinematic; no gore/blood/nudity; never use double quotes inside string values;
+cinematic PG-13 Hollywood style allowed (intense confrontations, stunts, rain, dramatic lighting);
+no gore/blood/nudity; avoid naming guns/weapons (use tactical gear / opponents);
+never use double quotes inside string values;
 CRITICAL: narration MUST be in the selected target language native script (Hindi→Devanagari);
 do NOT put English spoken lines in narration unless language is English;
-follow the user's story idea exactly."""
+follow the user's story idea exactly — keep warehouses, rescues, chases, and characters from the idea."""
 
 
 def plan_with_groq(

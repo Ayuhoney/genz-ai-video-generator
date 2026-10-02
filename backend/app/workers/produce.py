@@ -69,8 +69,11 @@ def _reuse_existing_asset(
     asset_type: str,
     scene_id: str | None,
     shot_id: str | None,
+    force: bool = False,
 ) -> dict[str, Any] | None:
     """If this scene/shot already has a saved asset on disk, skip fal and reuse it."""
+    if force:
+        return None
     db = get_sync_db_from_settings()
     assets = list_assets_for_project(db, project_id)
     matches = [
@@ -259,27 +262,54 @@ def _scene_image_for_i2v(
     return _scene_media_for_type(project_id, scene_id, "image")
 
 
+def _scene_visual_description(project_id: str, scene_id: str | None) -> str:
+    """Visual English description for image gen — not TTS narration."""
+    if not scene_id:
+        return ""
+    doc = get_project_doc(project_id) or {}
+    director = doc.get("director_response") or doc.get("directorResponse") or {}
+    if isinstance(director, dict):
+        for sc in director.get("scenes") or []:
+            if not isinstance(sc, dict):
+                continue
+            if str(sc.get("id") or "") != str(scene_id):
+                continue
+            return str(sc.get("description") or sc.get("title") or "").strip()
+    try:
+        from app.orchestration.checkpointing import thread_config
+        from app.orchestration.graph import compile_graph
+
+        graph = compile_graph()
+        snapshot = graph.get_state(thread_config(project_id))
+        for scene in (snapshot.values or {}).get("scenes") or []:
+            if scene.get("id") == scene_id:
+                return str(scene.get("description") or scene.get("title") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
 def produce_image(job: dict[str, Any]) -> dict[str, Any]:
     enforce_budget(job["project_id"])
+    inp = job.get("input") or {}
+    force = bool(inp.get("force") or inp.get("regen_token"))
     reused = _reuse_existing_asset(
         project_id=job["project_id"],
         asset_type="image",
         scene_id=job.get("scene_id"),
         shot_id=job.get("shot_id"),
+        force=force,
     )
     if reused:
         return reused
-    inp = job.get("input") or {}
     scene_id = job.get("scene_id")
-    script = scene_script_from_graph(job["project_id"], scene_id)
-    prompt = soft_visual_prompt(
-        str(
-            inp.get("prompt")
-            or script
-            or inp.get("kind")
-            or "cinematic film still, dramatic lighting, 16:9, no text"
-        )
+    visual = str(
+        inp.get("prompt")
+        or _scene_visual_description(job["project_id"], scene_id)
+        or inp.get("kind")
+        or "cinematic film still, dramatic lighting, 16:9, no text"
     )
+    prompt = soft_visual_prompt(visual)
     refs = locked_character_refs(job["project_id"])
     if refs:
         looks = "; ".join(
@@ -305,15 +335,17 @@ def produce_image(job: dict[str, Any]) -> dict[str, Any]:
 def produce_video(job: dict[str, Any]) -> dict[str, Any]:
     """Image-to-video: scene still → clip; duration clamped to fal WAN max (~15s)."""
     enforce_budget(job["project_id"])
+    inp = job.get("input") or {}
+    force = bool(inp.get("force") or inp.get("regen_token"))
     reused = _reuse_existing_asset(
         project_id=job["project_id"],
         asset_type="video",
         scene_id=job.get("scene_id"),
         shot_id=job.get("shot_id"),
+        force=force,
     )
     if reused:
         return reused
-    inp = job.get("input") or {}
     settings = _settings()
     duration = float(
         clamp_clip_seconds(

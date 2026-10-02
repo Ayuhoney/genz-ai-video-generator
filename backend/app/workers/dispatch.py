@@ -89,13 +89,22 @@ def dispatch_jobs(jobs: list[dict[str, Any]]) -> list[str]:
     return [j["id"] for j in jobs]
 
 
-def dispatch_image_jobs(project_id: str, scene_ids: list[str]) -> list[str]:
+def dispatch_image_jobs(
+    project_id: str,
+    scene_ids: list[str],
+    *,
+    regen_token: str | None = None,
+) -> list[str]:
     jobs = [
         create_job(
             project_id=project_id,
             task_type="image",
             scene_id=scene_id,
-            input_payload={"scene_id": scene_id, "kind": "storyboard"},
+            input_payload={
+                "scene_id": scene_id,
+                "kind": "storyboard",
+                **({"regen_token": regen_token, "force": True} if regen_token else {}),
+            },
         )
         for scene_id in scene_ids
     ]
@@ -107,9 +116,11 @@ def dispatch_shot_video_jobs(
     shots: list[dict[str, Any]],
     *,
     fail_shot_ids: set[str] | None = None,
+    regen_token: str | None = None,
 ) -> list[str]:
     """Parallel shot video jobs only (scene composition runs at assembly)."""
     fail_shot_ids = fail_shot_ids or set()
+    force = {"regen_token": regen_token, "force": True} if regen_token else {}
     shot_jobs = [
         create_job(
             project_id=project_id,
@@ -122,6 +133,7 @@ def dispatch_shot_video_jobs(
                 "attempt": shot.get("_attempt", 0),
                 "duration_seconds": float(shot.get("duration_seconds") or 5),
                 "prompt": str(shot.get("description") or shot.get("title") or shot["id"]),
+                **force,
             },
             simulate_failure=shot["id"] in fail_shot_ids,
         )
@@ -136,12 +148,14 @@ def dispatch_audio_jobs(
     *,
     language: str | None = None,
     genre: str | None = None,
+    regen_token: str | None = None,
 ) -> list[str]:
     """Per-scene TTS, SFX, and background music."""
     from app.workers.project_context import get_project_doc, spoken_text_for_scene
 
     project = get_project_doc(project_id) or {}
     lang = (language or str(project.get("language") or "Hindi")).strip() or "Hindi"
+    force = {"regen_token": regen_token, "force": True} if regen_token else {}
     jobs: list[dict[str, Any]] = []
     for scene in scenes:
         scene_id = scene["id"] if isinstance(scene, dict) else str(scene)
@@ -163,6 +177,7 @@ def dispatch_audio_jobs(
             "language": lang,
             "genre": genre,
             "script": narration,
+            **force,
         }
         jobs.append(
             create_job(
@@ -197,10 +212,12 @@ def dispatch_assembly_jobs(
     scenes: list[dict[str, Any]] | None = None,
     regenerate_scene_ids: list[str] | None = None,
     retry_counts: dict[str, int] | None = None,
+    regen_token: str | None = None,
 ) -> list[str]:
     """Scene FFmpeg compose (parallel), then final concat (chord callback)."""
     regen = set(regenerate_scene_ids or [])
     retry_counts = retry_counts or {}
+    force = {"regen_token": regen_token, "force": True} if regen_token else {}
     all_scene_ids = [
         (s["id"] if isinstance(s, dict) else str(s))
         for s in (scenes or [])
@@ -226,6 +243,7 @@ def dispatch_assembly_jobs(
                     ),
                     10.0,
                 ),
+                **force,
             },
         )
         for scene_id in scene_ids_to_render
@@ -237,6 +255,7 @@ def dispatch_assembly_jobs(
         input_payload={
             "project_id": project_id,
             "scene_ids": sorted(all_scene_ids) if all_scene_ids else None,
+            **force,
         },
     )
 

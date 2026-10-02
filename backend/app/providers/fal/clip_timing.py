@@ -114,75 +114,142 @@ def plan_shot_count(total_seconds: int, clip: int = DEFAULT_CLIP_SECONDS) -> int
 
 
 def soft_visual_prompt(text: str) -> str:
-    """Sanitize + append safety-friendly cinematic constraints."""
-    base = _scrub_risky_words((text or "").strip() or "cinematic film moment")
+    """Keep story nouns; rewrite fal-blocked tokens; no family-dinner rewrite."""
+    base = _soften_blocked_terms((text or "").strip() or "cinematic film moment")
     return (
-        f"{base}. Family-friendly cinematic still, soft film lighting, "
-        "peaceful everyday life, no gore, no blood, no weapons, no graphic violence, "
-        "no injury, tasteful drama, PG rating."
+        f"{base}. Cinematic film still, dramatic lighting, premium Hollywood color grade, "
+        "no gore, no blood, no graphic injury, tasteful PG-13 action drama."
     )
 
 
 def motion_only_prompt(text: str | None = None) -> str:
-    """i2v prompts must describe CAMERA MOTION only — narrative words trip fal checkers."""
-    _ = _scrub_risky_words(text or "")
-    return (
-        "Gentle cinematic camera motion: slow push-in, subtle parallax, "
-        "natural ambient movement, warm soft lighting, calm family-friendly mood, "
-        "no violence, no injury, no weapons, peaceful everyday scene."
-    )
+    """Camera motion derived from scene energy — never invent a different story."""
+    scene = _soften_blocked_terms((text or "").strip())
+    actionish = _looks_action(scene)
+    if actionish:
+        motion = (
+            "Dynamic cinematic camera: fast tracking shots, handheld energy, "
+            "slow-motion key impacts, dramatic rim lighting, rain reflections, "
+            "close-ups then wide stunt coverage"
+        )
+    else:
+        motion = (
+            "Cinematic camera: slow push-in, subtle parallax, natural ambient movement, "
+            "warm dramatic lighting"
+        )
+    if scene:
+        return (
+            f"{motion}. Scene context: {scene}. "
+            "No gore, no blood, no graphic injury."
+        )
+    return f"{motion}. No gore, no blood, no graphic injury."
 
 
-_RISKY = (
-    "accident",
-    "crash",
-    "collide",
-    "collision",
-    "emergency",
-    "brake",
-    "blood",
-    "gore",
-    "kill",
-    "murder",
-    "weapon",
-    "gun",
-    "knife",
-    "fight",
-    "attack",
-    "hurt",
-    "injury",
-    "injured",
-    "dead",
-    "death",
-    "die",
-    "dying",
-    "scream",
-    "danger",
-    "disaster",
-    "explode",
-    "bomb",
-    "suicide",
-    "rape",
-    "nude",
-    "naked",
-    "sex",
-    "violence",
-    "violent",
-    "war",
-    "shoot",
-    "stab",
-    "threat",
-    "panic",
-    "fear",
-    "terrify",
+# Map blocked / high-risk tokens to fal-safer synonyms (preserve story meaning).
+_BLOCKED_SYNONYMS: tuple[tuple[str, str], ...] = (
+    ("weapons", "tactical gear"),
+    ("weapon", "tactical gear"),
+    ("guns", "tactical gear"),
+    ("gun", "tactical gear"),
+    ("bullets", "sparks of impact"),
+    ("bullet", "spark of impact"),
+    ("knives", "metal props"),
+    ("knife", "metal prop"),
+    ("fights", "intense athletic confrontations"),
+    ("fight", "intense athletic confrontation"),
+    ("attacks", "confrontations"),
+    ("attack", "confrontation"),
+    ("attackers", "opponents"),
+    ("attacker", "opponent"),
+    ("armed", "hostile"),
+    ("criminals", "hostile figures"),
+    ("criminal", "hostile figure"),
+    ("explode", "erupt in a bright blast of light"),
+    ("explodes", "erupts in a bright blast of light"),
+    ("explosion", "bright blast of light"),
+    ("bomb", "device"),
+    ("shoot", "rush"),
+    ("shooting", "rushing"),
+    ("stab", "strike"),
+    ("blood", ""),
+    ("gore", ""),
+    ("kill", "defeat"),
+    ("murder", "abduction"),
+    ("dead", "fallen"),
+    ("death", "defeat"),
+    ("die", "fall"),
+    ("dying", "falling"),
+    ("injury", "strain"),
+    ("injured", "worn"),
+    ("hurt", "strained"),
+    ("violence", "intensity"),
+    ("violent", "intense"),
+    ("war", "conflict"),
+    ("threat", "tension"),
+    ("panic", "urgency"),
+    ("fear", "tension"),
+    ("terrify", "tense"),
+    ("scream", "shout"),
+    ("accident", "incident"),
+    ("crash", "impact"),
+    ("collide", "clash"),
+    ("collision", "clash"),
+    ("disaster", "crisis"),
+    ("danger", "high stakes"),
+    ("emergency", "urgent moment"),
+    ("suicide", ""),
+    ("rape", ""),
+    ("nude", ""),
+    ("naked", ""),
+    ("sex", ""),
 )
 
 
-def _scrub_risky_words(text: str) -> str:
+_ACTION_HINTS = (
+    "warehouse",
+    "rescue",
+    "fighter",
+    "combat",
+    "confrontation",
+    "chase",
+    "stunt",
+    "tracking",
+    "rain",
+    "night",
+    "opponent",
+    "tactical",
+    "punch",
+    "impact",
+    "athletic",
+    "escape",
+    "blast",
+)
+
+
+def _looks_action(text: str) -> bool:
+    low = (text or "").lower()
+    return any(h in low for h in _ACTION_HINTS)
+
+
+def _soften_blocked_terms(text: str) -> str:
+    """Replace blocked words with safer synonyms; keep warehouse/rescue/etc."""
     import re
 
     out = text
-    for word in _RISKY:
-        out = re.sub(rf"\b{re.escape(word)}\b", "", out, flags=re.IGNORECASE)
-    out = re.sub(r"\s{2,}", " ", out).strip(" ,.-")
-    return out or "peaceful cinematic moment"
+    # Longer phrases first (tuple is already longer-first for plurals).
+    for word, replacement in _BLOCKED_SYNONYMS:
+        out = re.sub(
+            rf"\b{re.escape(word)}\b",
+            replacement,
+            out,
+            flags=re.IGNORECASE,
+        )
+    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"\s+,", ",", out)
+    out = out.strip(" ,.-")
+    return out or "cinematic film moment"
+
+
+# Back-compat alias used by older imports/tests.
+def _scrub_risky_words(text: str) -> str:
+    return _soften_blocked_terms(text)

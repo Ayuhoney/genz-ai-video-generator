@@ -90,6 +90,8 @@ class WorkflowState(TypedDict, total=False):
     pause_reason: str
     pending_job_ids: list[str]
     awaiting_jobs: bool
+    # Unique token so regenerate creates new Celery jobs (breaks idempotency reuse).
+    regen_token: NotRequired[str]
 
 
 def empty_workflow_state(project_id: str, *, max_retries: int = 2) -> WorkflowState:

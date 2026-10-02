@@ -136,8 +136,14 @@ def _append_error(
 
 def _should_process_scene(state: WorkflowState, scene_id: str) -> bool:
     regenerate_scenes = set(state.get("regenerate_scene_ids") or [])
-    if regenerate_scenes:
-        return scene_id in regenerate_scenes
+    regenerate_shots = set(state.get("regenerate_shot_ids") or [])
+    if regenerate_scenes or regenerate_shots:
+        if scene_id in regenerate_scenes:
+            return True
+        for shot in state.get("shots") or []:
+            if shot.get("scene_id") == scene_id and shot.get("id") in regenerate_shots:
+                return True
+        return False
     status = (state.get("scene_status") or {}).get(scene_id)
     return status != "completed"
 
@@ -358,10 +364,27 @@ def asset_planning(state: WorkflowState) -> WorkflowState:
         for scene in state.get("scenes") or []
         if _should_process_scene(state, scene["id"])
     ]
-    if not scene_ids:
+    # Shot-only regenerate: skip still regen (reuse existing image).
+    if state.get("regenerate_shot_ids") and not (state.get("regenerate_scene_ids") or []):
+        scene_ids = []
+    if not scene_ids and not (state.get("regenerate_shot_ids") or state.get("regenerate_scene_ids")):
         scene_ids = [scene["id"] for scene in state.get("scenes") or []]
 
-    job_ids = dispatch_image_jobs(state["project_id"], scene_ids)
+    if not scene_ids:
+        return {
+            **state,
+            "awaiting_jobs": False,
+            "pending_job_ids": [],
+            "status": "running",
+            "pause_reason": "",
+            "current_step": step,
+        }
+
+    job_ids = dispatch_image_jobs(
+        state["project_id"],
+        scene_ids,
+        regen_token=state.get("regen_token"),
+    )
     return maybe_await_or_reconcile(state, step=step, job_ids=job_ids)
 
 
@@ -422,6 +445,7 @@ def video_generation_planning(state: WorkflowState) -> WorkflowState:
             working["project_id"],
             annotated,
             fail_shot_ids=fail_shots,
+            regen_token=working.get("regen_token"),
         )
 
         if not jobs_terminal(job_ids):
@@ -433,6 +457,7 @@ def video_generation_planning(state: WorkflowState) -> WorkflowState:
         if working.get("status") in {"paused", "failed"}:
             return working
 
+    # Keep regenerate_* until assembly so scene_render/final force correctly.
     return {
         **working,
         "awaiting_jobs": False,
@@ -440,8 +465,6 @@ def video_generation_planning(state: WorkflowState) -> WorkflowState:
         "status": "running",
         "pause_reason": "",
         "current_step": step,
-        "regenerate_scene_ids": [],
-        "regenerate_shot_ids": [],
     }
 
 
@@ -454,6 +477,17 @@ def audio_planning(state: WorkflowState) -> WorkflowState:
         return reconcile_pending_jobs(state, step=step)
 
     scenes = list(state.get("scenes") or [])
+    regen_scenes = set(state.get("regenerate_scene_ids") or [])
+    regen_shots = set(state.get("regenerate_shot_ids") or [])
+    if regen_scenes or regen_shots:
+        parent_from_shots = {
+            shot.get("scene_id")
+            for shot in state.get("shots") or []
+            if shot.get("id") in regen_shots
+        }
+        target = regen_scenes | {s for s in parent_from_shots if s}
+        scenes = [s for s in scenes if s.get("id") in target]
+
     language = None
     genre = None
     try:
@@ -469,6 +503,7 @@ def audio_planning(state: WorkflowState) -> WorkflowState:
         scenes,
         language=language,
         genre=genre,
+        regen_token=state.get("regen_token"),
     )
     return maybe_await_or_reconcile(state, step=step, job_ids=job_ids)
 
@@ -483,14 +518,23 @@ def assembly_planning(state: WorkflowState) -> WorkflowState:
 
     scenes = list(state.get("scenes") or [])
     retry_counts = dict(state.get("retry_counts") or {})
+    regen_scenes = list(state.get("regenerate_scene_ids") or [])
+    regen_shots = set(state.get("regenerate_shot_ids") or [])
+    if regen_shots:
+        for shot in state.get("shots") or []:
+            if shot.get("id") in regen_shots and shot.get("scene_id"):
+                sid = str(shot["scene_id"])
+                if sid not in regen_scenes:
+                    regen_scenes.append(sid)
+
     job_ids = dispatch_assembly_jobs(
         state["project_id"],
         scenes=scenes,
-        regenerate_scene_ids=state.get("regenerate_scene_ids"),
+        regenerate_scene_ids=regen_scenes or None,
         retry_counts=retry_counts,
+        regen_token=state.get("regen_token"),
     )
     return maybe_await_or_reconcile(state, step=step, job_ids=job_ids)
-
 
 
 def finalization(state: WorkflowState) -> WorkflowState:
@@ -510,8 +554,11 @@ def finalization(state: WorkflowState) -> WorkflowState:
         "current_step": "finalization",
         "status": "completed",
         "pause_reason": "",
+        "awaiting_jobs": False,
+        "pending_job_ids": [],
         "regenerate_scene_ids": [],
         "regenerate_shot_ids": [],
+        "regen_token": "",
     }
 
 

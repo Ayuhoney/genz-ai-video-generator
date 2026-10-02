@@ -176,6 +176,8 @@ async def regenerate_production(
     scene_ids: list[str] | None = None,
     shot_ids: list[str] | None = None,
 ) -> dict[str, Any]:
+    import uuid
+
     scene_ids = list(scene_ids or [])
     shot_ids = list(shot_ids or [])
     if not scene_ids and not shot_ids:
@@ -199,10 +201,18 @@ async def regenerate_production(
         )
 
     values = dict(snapshot.values)
+    regen_token = str(uuid.uuid4())
+
+    # Parent scenes of regenerating shots must be pending for assembly.
+    parent_scenes = {
+        str(shot.get("scene_id"))
+        for shot in values.get("shots") or []
+        if shot.get("id") in shot_ids and shot.get("scene_id")
+    }
     scenes = []
     for scene in values.get("scenes") or []:
         item = dict(scene)
-        if item["id"] in scene_ids:
+        if item["id"] in scene_ids or item["id"] in parent_scenes:
             item["status"] = "pending"
         scenes.append(item)
 
@@ -215,7 +225,7 @@ async def regenerate_production(
 
     scene_status = dict(values.get("scene_status") or {})
     shot_status = dict(values.get("shot_status") or {})
-    for sid in scene_ids:
+    for sid in set(scene_ids) | parent_scenes:
         scene_status[sid] = "pending"
     for shot in shots:
         if shot["id"] in shot_ids or shot["scene_id"] in scene_ids:
@@ -228,17 +238,21 @@ async def regenerate_production(
         "shot_status": shot_status,
         "regenerate_scene_ids": scene_ids,
         "regenerate_shot_ids": shot_ids,
+        "regen_token": regen_token,
         "status": "running",
         "pause_reason": "",
         "current_step": "video_generation_planning",
     }
+
+    # Scene regen redoes stills; shot-only skips asset_planning via empty scene list.
+    as_node = "shot_planning" if scene_ids else "asset_planning"
 
     def _apply_and_continue() -> None:
         try:
             graph.update_state(
                 config,
                 update,
-                as_node="shot_planning",
+                as_node=as_node,
             )
             graph.invoke(None, config)
         finally:

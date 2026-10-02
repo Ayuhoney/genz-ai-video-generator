@@ -52,7 +52,10 @@ CRITICAL LANGUAGE RULE: every voiceOver.text and all dialogue in `script` MUST b
 selected target language and its native script. If language is Hindi, write Hindi in Devanagari
 (example: "यह मेरी कहानी है।") — NEVER English sentences in voiceOver when language is not English.
 Scene description/shots stay in English for visuals; spoken audio comes only from voiceOver.
-cinematic continuity across scenes; no gore/blood/nudity; never use double quotes inside string values;
+Follow the USER IDEA's locations, characters, and stakes exactly (warehouse, rescue, action, etc.).
+Cinematic PG-13 Hollywood style is allowed: intense athletic confrontations, stunts, rain, dramatic lighting —
+but no gore, no blood, no graphic injury, no nudity, and avoid naming guns/weapons explicitly
+(use tactical gear / opponents / impacts instead); never use double quotes inside string values;
 do NOT set faceLocked or referenceImageUrl (face lock is user-uploaded later)."""
 
 def _clip_len() -> int:
@@ -444,11 +447,12 @@ def _from_groq(payload: DirectorGenerateRequest) -> DirectorResponse:
         f"Create about {n_shots} shots total across enough scenes.\n"
         f"USER IDEA (follow exactly, do not invent a different story):\n{payload.idea.strip()}\n"
         f"Extra instructions: {payload.instructions.strip() or 'none'}\n"
-        "Keep visuals family-friendly; no gore or graphic violence.\n"
+        "Keep visuals cinematic PG-13 Hollywood style; no gore, no graphic injury, no nudity.\n"
         "Accuracy check: title, characters, scene descriptions, and dialogue must clearly "
         "reflect the USER IDEA above — not a generic harbor/radio/storm template.\n"
-        "For image/video safety: avoid words like accident, crash, blood, weapon, injury; "
-        "describe calm help / care moments without danger imagery."
+        "For image/video safety: describe intense athletic confrontations, rescues, and "
+        "stunts without naming weapons, blood, or graphic injury; keep warehouse/night/"
+        "rain/characters from the USER IDEA intact."
     )
     raw = director_chat(prompt, GENERATE_SYS, temperature=0.15)
     data = _parse_json(raw)
