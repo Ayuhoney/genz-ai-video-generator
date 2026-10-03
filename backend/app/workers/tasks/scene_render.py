@@ -34,7 +34,7 @@ def shots_complete(results: list[dict[str, Any]], scene_job_id: str) -> dict[str
     return {
         "scene_job_id": scene_job_id,
         "shot_results": results,
-        "ok": all(r.get("status") == "succeeded" for r in results),
+        "ok": all(r.get("status") in {"succeeded", "completed"} for r in results),
     }
 
 

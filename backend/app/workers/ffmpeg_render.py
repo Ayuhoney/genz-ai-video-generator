@@ -38,10 +38,23 @@ def _scene_assets(project_id: str, scene_id: str) -> dict[str, Any]:
     db = _db()
     assets = list_assets_for_project(db, project_id)
     scene_assets = [a for a in assets if a.get("scene_id") == scene_id]
-    shots = sorted(
-        [a for a in scene_assets if a.get("type") == "video" and a.get("shot_id")],
-        key=lambda a: str(a.get("shot_id")),
-    )
+    ok_job_ids = {
+        str(j["id"])
+        for j in job_store.list_jobs_for_project(db, project_id)
+        if j.get("type") == "video"
+        and j.get("status") in job_store.SUCCESS_STATUSES
+    }
+    # Latest successful clip per shot_id (skip assets from failed jobs).
+    by_shot: dict[str, dict[str, Any]] = {}
+    for asset in scene_assets:
+        if asset.get("type") != "video" or not asset.get("shot_id"):
+            continue
+        jid = str(asset.get("job_id") or "")
+        if jid and jid not in ok_job_ids:
+            continue
+        by_shot[str(asset["shot_id"])] = asset
+    shots = sorted(by_shot.values(), key=lambda a: str(a.get("shot_id")))
+
     def _latest(asset_type: str) -> dict[str, Any] | None:
         matches = [a for a in scene_assets if a.get("type") == asset_type]
         return matches[-1] if matches else None
@@ -174,8 +187,9 @@ def render_scene_for_job(job: dict[str, Any]) -> dict[str, Any]:
             else None
         )
         out = tmp_root / "scene.mp4"
+        work = tmp_root / "work"
         duration = render_scene_video(
-            work_dir=tmp_root / "work",
+            work_dir=work,
             inputs=SceneInputs(
                 shot_clips=shot_paths,
                 narration=narration,
@@ -189,6 +203,15 @@ def render_scene_for_job(job: dict[str, Any]) -> dict[str, Any]:
             height=settings.ffmpeg_height,
             fps=settings.ffmpeg_fps,
         )
+        mismatch_meta: dict[str, Any] = {}
+        flag_file = work / "shot_duration_mismatch.json"
+        if flag_file.is_file():
+            try:
+                import json
+
+                mismatch_meta = json.loads(flag_file.read_text(encoding="utf-8"))
+            except Exception:
+                mismatch_meta = {}
         data = out.read_bytes()
         return _upload_video_output(
             job=job,
@@ -201,6 +224,8 @@ def render_scene_for_job(job: dict[str, Any]) -> dict[str, Any]:
                 "ffmpeg": True,
                 "planned_duration_seconds": float(scene_plan),
                 "shot_planned_durations": shot_plans,
+                "shot_duration_mismatch": bool(mismatch_meta.get("any")),
+                "shot_duration_mismatches": mismatch_meta.get("mismatches") or [],
             },
         )
     finally:
@@ -212,6 +237,23 @@ def assemble_final_for_job(job: dict[str, Any]) -> dict[str, Any]:
     storage = get_storage()
     db = _db()
     inp = job.get("input") or {}
+    # Never stitch while video clips are still open / failed.
+    video_jobs = [
+        j
+        for j in job_store.list_jobs_for_project(db, job["project_id"])
+        if j.get("type") == "video"
+    ]
+    if video_jobs:
+        incomplete = [
+            j
+            for j in video_jobs
+            if j.get("status") not in job_store.SUCCESS_STATUSES
+        ]
+        if incomplete:
+            raise ValueError(
+                f"Cannot assemble final: {len(incomplete)} video clip(s) "
+                "not completed (regenerate failed clips only, then retry stitch)"
+            )
     scene_ids = list(inp.get("scene_ids") or [])
     if not scene_ids:
         # Fallback: all scene_render assets ordered by scene id.
@@ -267,7 +309,19 @@ def assemble_final_for_job(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def _mark_project_completed(project_id: str, asset_id: str, r2_key: str) -> None:
+    settings = get_worker_settings()
     db = _db()
+    if not settings.allow_mock:
+        mock_assets = [
+            a
+            for a in list_assets_for_project(db, project_id)
+            if str(a.get("provider") or "").lower() == "mock"
+        ]
+        if mock_assets:
+            raise RuntimeError(
+                f"Refusing to mark project {project_id} completed: "
+                f"{len(mock_assets)} mock asset(s) present (ALLOW_MOCK=false)"
+            )
     filt: list[dict[str, Any]] = [{"_id": project_id}]
     if ObjectId.is_valid(project_id):
         filt.append({"_id": ObjectId(project_id)})

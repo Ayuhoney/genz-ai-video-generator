@@ -1,4 +1,4 @@
-"""Prompt softening keeps action story fidelity."""
+"""Prompt softening keeps scene text; only strips blocked words."""
 
 from __future__ import annotations
 
@@ -19,29 +19,51 @@ def test_soft_visual_keeps_warehouse_and_rescue() -> None:
     assert "rescue" in out or "journalist" in out
     assert "peaceful everyday life" not in out
     assert "family-friendly" not in out
-    assert "gun" not in out
-    # Safety appendix may say "no blood" / "no gore" — story body must not invent gore.
-    story, _, safety = out.partition(". cinematic film still")
-    assert "blood" not in story
-    assert "no gore" in safety or "no gore" in out
+    assert "fight" in out  # meaning preserved (not rewritten)
+    assert "blood" not in out
+    assert "gore" not in out
 
 
-def test_soft_visual_maps_fight_to_confrontation() -> None:
-    out = soft_visual_prompt("warehouse fight with armed attackers").lower()
+def test_softener_removes_blocked_keeps_scene_words() -> None:
+    out = soft_visual_prompt("warehouse fight with blood and gore").lower()
     assert "warehouse" in out
-    assert "confrontation" in out or "opponent" in out
-    assert "peaceful everyday" not in out
+    assert "fight" in out
+    assert "blood" not in out
+    assert "gore" not in out
+    assert "confrontation" not in out  # no meaning-changing rewrite
 
 
-def test_motion_prompt_uses_scene_context_for_action() -> None:
+def test_soft_visual_idempotent() -> None:
+    scene = "Sunset at forest edge, Rama, Sita, Lakshmana walk into forest"
+    once = soft_visual_prompt(scene)
+    twice = soft_visual_prompt(once)
+    assert once == twice
+    assert once.lower().count("cinematic film still") == 1
+
+
+def test_motion_prompt_keeps_scene_text() -> None:
     out = motion_only_prompt(ACTION_IDEA).lower()
     assert "warehouse" in out
-    assert "tracking" in out or "dynamic" in out
+    assert "fight" in out
+    assert "journalist" in out
+    assert "cinematic camera motion" in out
     assert "peaceful everyday scene" not in out
-    assert "family-friendly" not in out
+    assert "blood" not in out
+    assert "gore" not in out
 
 
 def test_motion_prompt_gentle_for_non_action() -> None:
     out = motion_only_prompt("a quiet chai stall at dusk in mumbai").lower()
-    assert "push-in" in out or "parallax" in out
-    assert "chai" in out or "mumbai" in out
+    assert "chai" in out
+    assert "mumbai" in out
+
+
+def test_motion_prompt_idempotent() -> None:
+    scene = (
+        "Wide shot of throne room, king on throne, Rama kneeling, "
+        "crowd cheering, Kaikeyi in shadows"
+    )
+    once = motion_only_prompt(scene)
+    twice = motion_only_prompt(once)
+    assert once == twice
+    assert "throne" in once.lower()

@@ -11,8 +11,24 @@ from typing import Any
 
 import httpx
 
+from app.providers.fal.errors import (
+    FalErrorClass,
+    FalErrorInfo,
+    extract_fal_error_fields,
+    is_content_blocked_error,
+)
+
 QUEUE_BASE = "https://queue.fal.run"
 STORAGE_INITIATE = "https://rest.fal.ai/storage/upload/initiate"
+
+# Back-compat re-export
+__all__ = [
+    "FalAPIError",
+    "FalClient",
+    "extract_image_url",
+    "extract_video_url",
+    "is_content_blocked_error",
+]
 
 
 class FalAPIError(Exception):
@@ -22,31 +38,26 @@ class FalAPIError(Exception):
         *,
         status_code: int | None = None,
         retryable: bool = True,
+        error_info: FalErrorInfo | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
-        self.retryable = retryable
-
-
-def is_content_blocked_error(exc: BaseException) -> bool:
-    text = str(exc).lower()
-    markers = (
-        "content checker",
-        "flagged",
-        "safety checker",
-        "content could not be processed",
-        "nsfw",
-        "moderation",
-    )
-    return any(m in text for m in markers)
+        self.error_info = error_info or extract_fal_error_fields(
+            message, status_code=status_code
+        )
+        # Structured classification wins; `retryable` arg is ignored when info present.
+        self.retryable = self.error_info.error_class == FalErrorClass.RETRYABLE
+        _ = retryable
 
 
 def _raise_fal(message: str, *, status_code: int | None = None) -> None:
-    retryable = not is_content_blocked_error(Exception(message))
-    # Content / validation blocks should fail fast (no burn retries).
-    if status_code == 422:
-        retryable = False
-    raise FalAPIError(message, status_code=status_code, retryable=retryable)
+    info = extract_fal_error_fields(message, status_code=status_code)
+    raise FalAPIError(
+        message,
+        status_code=status_code,
+        retryable=info.error_class == FalErrorClass.RETRYABLE,
+        error_info=info,
+    )
 
 
 class FalClient:
@@ -182,7 +193,15 @@ class FalClient:
 
         raise FalAPIError(
             f"fal poll timed out after {self.poll_timeout}s "
-            f"(request_id={request_id})"
+            f"(request_id={request_id})",
+            status_code=408,
+            retryable=True,
+            error_info=FalErrorInfo(
+                error_class=FalErrorClass.RETRYABLE,
+                message=f"fal poll timed out after {self.poll_timeout}s",
+                status_code=408,
+                request_id=str(request_id),
+            ),
         )
 
     def upload_bytes(

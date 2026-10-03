@@ -19,6 +19,20 @@ from app.providers.base import (
     VideoRequest,
 )
 
+
+def mock_allowed() -> bool:
+    from app.workers.settings import get_worker_settings
+
+    return bool(get_worker_settings().allow_mock)
+
+
+def _require_mock_allowed() -> None:
+    if not mock_allowed():
+        raise RuntimeError(
+            "Mock providers are disabled (ALLOW_MOCK=false). "
+            "Configure real providers or set ALLOW_MOCK=true for local/dev only."
+        )
+
 # Minimal valid 1x1 PNG
 _PNG_1X1 = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
@@ -68,6 +82,7 @@ class MockImageProvider(ImageProvider):
     name = "mock"
 
     def generate(self, request: ImageRequest) -> ProviderResult:
+        _require_mock_allowed()
         return ProviderResult(
             data=_PNG_1X1,
             mime_type="image/png",
@@ -86,6 +101,7 @@ class MockVideoProvider(VideoProvider):
     name = "mock"
 
     def generate(self, request: VideoRequest) -> ProviderResult:
+        _require_mock_allowed()
         duration = max(0.2, min(float(request.duration_seconds or 0.5), 1.0))
         data: bytes
         if _lavfi_video_bytes is not None:
@@ -107,6 +123,7 @@ class MockTTSProvider(TTSProvider):
     name = "mock"
 
     def generate(self, request: TTSRequest) -> ProviderResult:
+        _require_mock_allowed()
         return ProviderResult(
             data=_wav_bytes(0.15),
             mime_type="audio/wav",
@@ -122,6 +139,7 @@ class MockSFXProvider(SFXProvider):
     name = "mock"
 
     def generate(self, request: SFXRequest) -> ProviderResult:
+        _require_mock_allowed()
         return ProviderResult(
             data=_wav_bytes(request.duration_seconds),
             mime_type="audio/wav",
@@ -137,6 +155,7 @@ class MockMusicProvider(MusicProvider):
     name = "mock"
 
     def generate(self, request: MusicRequest) -> ProviderResult:
+        _require_mock_allowed()
         return ProviderResult(
             data=_wav_bytes(min(request.duration_seconds, 1.0)),
             mime_type="audio/wav",

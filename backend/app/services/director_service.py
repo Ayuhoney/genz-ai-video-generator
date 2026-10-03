@@ -32,7 +32,7 @@ The `script` field MUST be a proper cinematic screenplay (not a shot list): use 
 headings, present-tense action lines, character cues, and dialogue in the TARGET LANGUAGE
 using that language's native script (e.g. Hindi → Devanagari, Tamil → Tamil script).
 Mention the selected GENRE in the concept. Story must have a clear beginning, middle, and ending.
-Each SHOT becomes one fal image-to-video clip. Every shot durationSeconds MUST be 5-15 (prefer 15).
+Each SHOT becomes one fal image-to-video clip. Every shot durationSeconds MUST be 1-5 (prefer 5 = SHOT_DURATION_SECONDS).
 Sum of ALL shot durations MUST equal the target total duration exactly.
 Return ONLY valid JSON (no markdown):
 {"title": str,
@@ -45,8 +45,8 @@ Return ONLY valid JSON (no markdown):
    "durationSeconds": number (sum of its shots),
    "sfxNotes": "ambient sounds, no speech",
    "voiceOver": [{"id": "vo-1", "characterId": "char-1 or null", "characterName": str, "text": "spoken line ONLY in target language native script", "estimatedSeconds": number}],
-   "shots": [{"id": "shot-1", "order": 1, "title": str, "description": str, "durationSeconds": 15, "camera": "angle/move"}]}]}
-Rules: follow the user's idea; each shot durationSeconds <= 15; 1-4 shots per scene;
+   "shots": [{"id": "shot-1", "order": 1, "title": str, "description": str, "durationSeconds": 5, "camera": "angle/move"}]}]}
+Rules: follow the user's idea; each shot durationSeconds <= 5 (SHOT_DURATION_SECONDS); 1-4 shots per scene;
 shot durations must sum to the target duration;
 CRITICAL LANGUAGE RULE: every voiceOver.text and all dialogue in `script` MUST be in the
 selected target language and its native script. If language is Hindi, write Hindi in Devanagari
@@ -63,6 +63,12 @@ def _clip_len() -> int:
         from app.core.config import get_settings
 
         return clip_seconds_from_settings(get_settings())
+    except Exception:
+        pass
+    try:
+        from app.workers.settings import get_worker_settings
+
+        return clip_seconds_from_settings(get_worker_settings())
     except Exception:
         return DEFAULT_CLIP_SECONDS
 
@@ -310,17 +316,21 @@ def _mock_plan(payload: DirectorGenerateRequest) -> DirectorResponse:
         if not chunk:
             chunk = [clip]
 
+        from app.providers.fal.clip_timing import shot_beat_description
+
         shots: list[ShotPlan] = []
         for s_i, dur in enumerate(chunk, start=1):
-            label = "Establish" if s_i == 1 else f"Beat {s_i}"
+            label = ("Wide", "Medium", "Close-up")[min(s_i - 1, 2)]
+            if s_i > 3:
+                label = f"Beat {s_i}"
             shots.append(
                 ShotPlan(
                     id=f"{sid}-shot-{s_i}",
                     order=s_i,
                     title=f"{b_title} — {label}",
-                    description=description if s_i == 1 else f"Closer coverage: {description}",
+                    description=shot_beat_description(description, s_i, len(chunk)),
                     duration_seconds=float(dur),
-                    camera=camera if s_i == 1 else "Medium / subtle move",
+                    camera=camera if s_i == 1 else label,
                 )
             )
 

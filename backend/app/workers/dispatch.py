@@ -35,7 +35,7 @@ def _db():
 
 
 def _needs_dispatch(job: dict[str, Any]) -> bool:
-    return job.get("status") != "succeeded"
+    return job.get("status") not in job_store.SUCCESS_STATUSES
 
 
 def _send(task, job_id: str) -> str | None:
@@ -95,6 +95,29 @@ def dispatch_image_jobs(
     *,
     regen_token: str | None = None,
 ) -> list[str]:
+    # Clear prior face lock so later scenes wait for the new starting-scene still.
+    try:
+        from app.workers.project_context import clear_locked_look, first_scene_id
+
+        if first_scene_id(project_id):
+            clear_locked_look(project_id)
+    except Exception:
+        pass
+
+    force_payload = (
+        {"regen_token": regen_token, "force": True} if regen_token else {}
+    )
+    # Prefer starting scene first so look-lock is available sooner.
+    try:
+        from app.workers.project_context import first_scene_id
+
+        anchor = first_scene_id(project_id)
+    except Exception:
+        anchor = None
+    ordered = list(scene_ids)
+    if anchor and anchor in ordered:
+        ordered = [anchor] + [s for s in ordered if s != anchor]
+
     jobs = [
         create_job(
             project_id=project_id,
@@ -103,10 +126,10 @@ def dispatch_image_jobs(
             input_payload={
                 "scene_id": scene_id,
                 "kind": "storyboard",
-                **({"regen_token": regen_token, "force": True} if regen_token else {}),
+                **force_payload,
             },
         )
-        for scene_id in scene_ids
+        for scene_id in ordered
     ]
     return dispatch_jobs(jobs)
 

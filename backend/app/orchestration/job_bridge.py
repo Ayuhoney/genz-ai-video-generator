@@ -40,8 +40,21 @@ def reconcile_pending_jobs(state: WorkflowState, *, step: str) -> WorkflowState:
 
     jobs = [job_store.get_job(db, jid) for jid in job_ids]
     jobs = [j for j in jobs if j is not None]
-    failed = [j for j in jobs if j.get("status") in {"failed", "timed_out"}]
-    succeeded = [j for j in jobs if j.get("status") == "succeeded"]
+    failed = [
+        j
+        for j in jobs
+        if j.get("status")
+        in {
+            "failed",
+            "timed_out",
+            "needs_new_image",
+            "needs_new_prompt",
+            "failed_retryable",
+        }
+    ]
+    succeeded = [
+        j for j in jobs if j.get("status") in {"succeeded", "completed"}
+    ]
 
     scenes = [dict(s) for s in state.get("scenes") or []]
     shots = [dict(s) for s in state.get("shots") or []]

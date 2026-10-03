@@ -63,7 +63,7 @@ def test_parallel_shot_dispatch_and_progress(orchestration_db) -> None:
     db = _db()
     assert job_store.jobs_all_terminal(db, job_ids)
     jobs = [job_store.get_job(db, jid) for jid in job_ids]
-    assert all(j and j["status"] == "succeeded" for j in jobs)
+    assert all(j and j["status"] in {"succeeded", "completed"} for j in jobs)
     assert all((j or {}).get("progress") == 100 for j in jobs)
 
 
@@ -82,7 +82,7 @@ def test_simulated_failure_and_retry_path(orchestration_db) -> None:
         generate_video.apply(args=(job["id"],)).get()
     failed = job_store.get_job(db, job["id"])
     assert failed is not None
-    assert failed["status"] in {"failed", "timed_out", "retrying"}
+    assert failed["status"] in {"failed", "timed_out", "retrying", "failed_retryable"}
 
     # New attempt hash → new job succeeds
     job2 = create_job(
@@ -95,7 +95,47 @@ def test_simulated_failure_and_retry_path(orchestration_db) -> None:
     )
     assert job2["id"] != job["id"]
     result = generate_video.apply(args=(job2["id"],)).get()
-    assert result["status"] == "succeeded"
+    assert result["status"] in {"succeeded", "completed"}
+
+
+def test_job_failure_persists_provider_error_fields(orchestration_db) -> None:
+    from app.providers.base import ProviderError
+    from app.workers import task_runtime
+
+    db = _db()
+    project_id = f"p-{uuid.uuid4().hex[:8]}"
+    job = create_job(
+        project_id=project_id,
+        task_type="video",
+        shot_id="shot-provider-err",
+        input_payload={"shot_id": "shot-provider-err"},
+    )
+
+    def boom(_tmp):
+        raise ProviderError(
+            "All video providers failed: ['fal']",
+            errors=["fal: content rejected"],
+            error_class="CONTENT_REJECTED",
+            fal_request_id="req-abc-123",
+            fal_calls=3,
+        )
+
+    class FakeTask:
+        request = type("R", (), {"id": "celery-1", "retries": 0})()
+
+        def retry(self, exc=None, countdown=0):
+            raise exc
+
+    with pytest.raises(ProviderError):
+        task_runtime.run_mock_job(FakeTask(), job_id=job["id"], work=boom)  # type: ignore[arg-type]
+
+    saved = job_store.get_job(db, job["id"])
+    assert saved is not None
+    assert saved["status"] == "failed"
+    assert saved["errors"] == ["fal: content rejected"]
+    assert saved["error_class"] == "CONTENT_REJECTED"
+    assert saved["fal_request_id"] == "req-abc-123"
+    assert saved["fal_calls"] == 3
 
 
 def test_timeout_marks_job(orchestration_db, monkeypatch) -> None:

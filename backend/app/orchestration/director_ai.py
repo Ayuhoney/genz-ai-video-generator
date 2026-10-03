@@ -142,8 +142,10 @@ Return ONLY valid JSON:
    "duration_seconds": number (sum of shot lengths),
    "motion": "camera + subject movement",
    "sfx": "comma-separated ambient sounds, no speech",
-   "shots": [{"order": 1, "title": str, "description": str, "duration_seconds": 15}]}]}
-Rules: each shot duration_seconds MUST be 10-15 (prefer 15); enough shots to cover total duration;
+   "shots": [{"order": 1, "title": str, "description": str, "duration_seconds": 5}]}]}
+Rules: each shot duration_seconds MUST be 1-5 (prefer 5); split longer scenes into multiple shots (15s→3x5);
+each shot description MUST be a distinct angle/beat (wide / medium / close-up), never identical text;
+enough shots to cover total duration;
 cinematic PG-13 Hollywood style allowed (intense confrontations, stunts, rain, dramatic lighting);
 no gore/blood/nudity; avoid naming guns/weapons (use tactical gear / opponents);
 never use double quotes inside string values;
@@ -218,39 +220,40 @@ def plan_with_groq(
                 ],
             }
         )
-        shot_specs = sc.get("shots") or []
-        if not shot_specs:
-            half = max(3.0, round(dur / 2, 2))
-            shot_specs = [
-                {
-                    "order": 1,
-                    "title": f"{sc.get('title') or sid} A",
-                    "description": motion or desc,
-                    "duration_seconds": half,
-                },
-                {
-                    "order": 2,
-                    "title": f"{sc.get('title') or sid} B",
-                    "description": desc,
-                    "duration_seconds": max(3.0, round(dur - half, 2)),
-                },
-            ]
-        for s_index, sh in enumerate(shot_specs[:8], start=1):
-            from app.providers.fal.clip_timing import clamp_clip_seconds
+        from app.providers.fal.clip_timing import (
+            clip_seconds_from_settings,
+            plan_shot_durations,
+            shot_beat_description,
+        )
 
+        try:
+            from app.core.config import get_settings
+
+            max_shot = clip_seconds_from_settings(get_settings())
+        except Exception:
+            max_shot = 5
+        durs = plan_shot_durations(int(round(dur)), max_clip=max_shot)
+        shot_specs = sc.get("shots") or []
+        for s_index, shot_dur in enumerate(durs, start=1):
+            sh = shot_specs[s_index - 1] if s_index - 1 < len(shot_specs) else {}
+            if not isinstance(sh, dict):
+                sh = {}
+            raw_desc = str(sh.get("description") or "").strip()
+            if not raw_desc or (
+                s_index > 1
+                and raw_desc
+                == str((shot_specs[0] or {}).get("description") or "").strip()
+            ):
+                raw_desc = shot_beat_description(desc or motion, s_index, len(durs))
             shots.append(
                 {
                     "id": f"{sid}-shot-{s_index}",
                     "scene_id": sid,
                     "order": int(sh.get("order") or s_index),
                     "title": str(sh.get("title") or f"{sid} / Shot {s_index}"),
-                    "description": str(sh.get("description") or desc),
+                    "description": raw_desc,
                     "status": "pending",
-                    "duration_seconds": float(
-                        clamp_clip_seconds(
-                            sh.get("duration_seconds") or sh.get("durationSeconds") or 15
-                        )
-                    ),
+                    "duration_seconds": float(shot_dur),
                 }
             )
     if not scenes:

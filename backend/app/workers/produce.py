@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any, Literal
 
 from bson import ObjectId
@@ -25,20 +27,22 @@ from app.storage.asset_store import (
 )
 from app.media.ffprobe import probe_duration_seconds, suffix_for_mime
 from app.providers.sarvam.audio import language_to_sarvam_code
-from app.providers.fal.clip_timing import (
-    clamp_clip_seconds,
-    motion_only_prompt,
-    soft_visual_prompt,
-)
+from app.providers.fal.clip_timing import clamp_clip_seconds
 from app.workers import job_store
 from app.workers.project_context import (
     build_music_prompt,
     build_sfx_prompt,
+    character_bible_prompt,
     fallback_spoken_line,
+    first_scene_id,
+    get_locked_look,
     get_project_doc,
     locked_character_refs,
     scene_script_from_graph,
+    set_locked_look,
 )
+
+logger = logging.getLogger(__name__)
 
 AssetKind = Literal[
     "image",
@@ -289,28 +293,88 @@ def _scene_visual_description(project_id: str, scene_id: str | None) -> str:
     return ""
 
 
+def _upload_look_to_fal_cdn(data: bytes, mime: str | None) -> str:
+    """Upload locked look bytes to fal CDN (private storage URLs are rejected)."""
+    from app.providers.fal.image_input import ensure_uploaded, validate_image_bytes
+    from app.providers.fal.image_video import _make_client
+
+    validated = validate_image_bytes(data, claimed_mime=mime)
+    with _make_client() as client:
+        return ensure_uploaded(client, validated)
+
+
+def _wait_for_locked_look(
+    project_id: str,
+    *,
+    expected_scene_id: str,
+    timeout_seconds: float,
+) -> tuple[bytes, str]:
+    """Block until starting-scene still is locked; return (bytes, mime)."""
+    deadline = time.time() + max(5.0, float(timeout_seconds or 600.0))
+    poll = 2.0
+    storage = get_storage()
+    while time.time() < deadline:
+        lock_scene, r2_key = get_locked_look(project_id)
+        if lock_scene == str(expected_scene_id) and r2_key:
+            try:
+                if storage.exists(r2_key):
+                    data = storage.download(r2_key)
+                    mime = "image/jpeg"
+                    db = get_sync_db_from_settings()
+                    for asset in list_assets_for_project(db, project_id):
+                        if asset.get("r2_key") == r2_key:
+                            mime = str(asset.get("mime") or mime)
+                            break
+                    if data:
+                        return data, mime
+            except Exception as exc:
+                logger.warning("locked look download failed: %s", exc)
+        time.sleep(poll)
+    raise RuntimeError(
+        f"Timed out waiting for starting-scene face lock ({expected_scene_id})"
+    )
+
+
 def produce_image(job: dict[str, Any]) -> dict[str, Any]:
     enforce_budget(job["project_id"])
     inp = job.get("input") or {}
     force = bool(inp.get("force") or inp.get("regen_token"))
+    project_id = job["project_id"]
+    scene_id = job.get("scene_id")
+    anchor_id = first_scene_id(project_id)
+    is_anchor = bool(
+        scene_id and anchor_id and str(scene_id) == str(anchor_id)
+    )
     reused = _reuse_existing_asset(
-        project_id=job["project_id"],
+        project_id=project_id,
         asset_type="image",
-        scene_id=job.get("scene_id"),
+        scene_id=scene_id,
         shot_id=job.get("shot_id"),
         force=force,
     )
     if reused:
+        if is_anchor and reused.get("r2_key"):
+            set_locked_look(
+                project_id,
+                scene_id=str(scene_id),
+                r2_key=str(reused["r2_key"]),
+            )
         return reused
-    scene_id = job.get("scene_id")
+    # Never use kind="storyboard" (or any kind) as the image prompt.
     visual = str(
-        inp.get("prompt")
-        or _scene_visual_description(job["project_id"], scene_id)
-        or inp.get("kind")
-        or "cinematic film still, dramatic lighting, 16:9, no text"
-    )
-    prompt = soft_visual_prompt(visual)
-    refs = locked_character_refs(job["project_id"])
+        inp.get("prompt") or _scene_visual_description(project_id, scene_id) or ""
+    ).strip()
+    if not visual or visual.lower() == "storyboard":
+        raise ValueError(
+            f"Missing scene description for image job "
+            f"(project={project_id} scene={scene_id}); cannot use kind as prompt"
+        )
+    # FalImageProvider wraps with soft_visual_prompt once — do not pre-wrap.
+    prompt = visual
+    bible = character_bible_prompt(project_id)
+    if bible:
+        prompt = f"{prompt}. {bible}"
+    refs = locked_character_refs(project_id)
     if refs:
         looks = "; ".join(
             f"{r['name']}: {r['description']}" for r in refs if r.get("description")
@@ -319,17 +383,57 @@ def produce_image(job: dict[str, Any]) -> dict[str, Any]:
             f"{prompt}. FACE LOCK — same identity every shot for: {looks}. "
             "Do not change face, age, or hairstyle."
         )
+    ref_urls = [r["url"] for r in refs if r.get("url")]
+    extra: dict[str, Any] = {}
+    settings = _settings()
+
+    # No uploaded face refs → lock faces from the starting scene still for later scenes.
+    if not ref_urls and not is_anchor and anchor_id:
+        wait_s = float(getattr(settings, "fal_look_lock_wait_seconds", 600.0) or 600.0)
+        look_bytes, look_mime = _wait_for_locked_look(
+            project_id,
+            expected_scene_id=str(anchor_id),
+            timeout_seconds=wait_s,
+        )
+        fal_url = _upload_look_to_fal_cdn(look_bytes, look_mime)
+        ref_urls = [fal_url]
+        prompt = (
+            f"{prompt}. FACE LOCK from starting scene — keep the exact same "
+            "people, faces, age, skin tone, and hairstyle; only change pose, "
+            "camera, and environment for this scene."
+        )
+        extra["strength"] = float(
+            getattr(settings, "fal_image_i2i_strength", 0.65) or 0.65
+        )
+        i2i = str(getattr(settings, "fal_image_i2i_model", "") or "").strip()
+        if i2i:
+            extra["i2i_model"] = i2i
+        logger.info(
+            "look_lock project=%s scene=%s from_anchor=%s",
+            project_id,
+            scene_id,
+            anchor_id,
+        )
+
     result = get_registry().generate_image(
         ImageRequest(
-            project_id=job["project_id"],
+            project_id=project_id,
             scene_id=scene_id,
             prompt=prompt,
             width=1280,
             height=720,
-            reference_image_urls=[r["url"] for r in refs if r.get("url")],
+            reference_image_urls=ref_urls,
+            extra=extra,
         )
     )
-    return _record_and_upload(job=job, result=result, asset_type="image")
+    out = _record_and_upload(job=job, result=result, asset_type="image")
+    if is_anchor and out.get("r2_key"):
+        set_locked_look(
+            project_id,
+            scene_id=str(scene_id),
+            r2_key=str(out["r2_key"]),
+        )
+    return out
 
 
 def produce_video(job: dict[str, Any]) -> dict[str, Any]:
@@ -350,25 +454,41 @@ def produce_video(job: dict[str, Any]) -> dict[str, Any]:
     duration = float(
         clamp_clip_seconds(
             inp.get("duration_seconds"),
-            default=int(getattr(settings, "fal_video_clip_seconds", None) or 15),
+            default=int(
+                getattr(settings, "shot_duration_seconds", None)
+                or getattr(settings, "fal_video_clip_seconds", None)
+                or 5
+            ),
         )
     )
     image_bytes, image_mime, image_url = _scene_image_for_i2v(
         job["project_id"],
         job.get("scene_id"),
     )
-    extra: dict[str, Any] = {}
+    extra: dict[str, Any] = {"job_id": job["id"]}
     res = getattr(settings, "fal_video_resolution", None)
     if res:
         extra["resolution"] = res
+    # Reserve estimated cost on the job for JOB_MAX_USD accounting.
+    est = float(getattr(settings, "fal_video_cost_usd", 0.05) or 0.05)
+    job_store.update_job(
+        get_sync_db_from_settings(),
+        job["id"],
+        estimated_cost_usd=est,
+        status="uploading",
+        clip_state="uploading",
+    )
     result = get_registry().generate_video(
         VideoRequest(
             project_id=job["project_id"],
             scene_id=job.get("scene_id"),
             shot_id=job.get("shot_id"),
-            # i2v: image already carries the scene — prompt is camera motion only.
-            prompt=motion_only_prompt(
-                str(inp.get("prompt") or inp.get("camera") or "")
+            # Keep shot/scene text in the video prompt; softener wraps once in fal.
+            prompt=str(
+                inp.get("prompt")
+                or _scene_visual_description(job["project_id"], job.get("scene_id"))
+                or inp.get("camera")
+                or ""
             ),
             duration_seconds=duration,
             image_url=image_url,

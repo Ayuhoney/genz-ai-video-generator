@@ -24,6 +24,7 @@ os.environ["PROVIDER_TTS"] = "mock"
 os.environ["PROVIDER_SFX"] = "mock"
 os.environ["PROVIDER_MUSIC"] = "mock"
 os.environ["DIRECTOR_PROVIDER"] = "mock"
+os.environ["ALLOW_MOCK"] = "true"
 
 from collections.abc import AsyncIterator, Iterator
 

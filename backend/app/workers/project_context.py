@@ -134,8 +134,6 @@ def load_director_plan_for_production(
     if not isinstance(raw_scenes, list) or not raw_scenes:
         return None
 
-    from app.providers.fal.clip_timing import clamp_clip_seconds
-
     scenes: list[dict[str, Any]] = []
     shots: list[dict[str, Any]] = []
     for index, sc in enumerate(raw_scenes, start=1):
@@ -175,6 +173,19 @@ def load_director_plan_for_production(
         narration = join_voice_over_text(vo_norm)
         if not narration:
             narration = fallback_spoken_line(language=language, scene_title=title)
+        from app.providers.fal.clip_timing import (
+            clip_seconds_from_settings,
+            plan_shot_durations,
+            shot_beat_description,
+        )
+
+        try:
+            from app.core.config import get_settings
+
+            max_shot = clip_seconds_from_settings(get_settings())
+        except Exception:
+            max_shot = 5
+
         scene_dur = int(
             sc.get("durationSeconds")
             or sc.get("duration_seconds")
@@ -187,56 +198,52 @@ def load_director_plan_for_production(
                         float(
                             sh.get("durationSeconds")
                             or sh.get("duration_seconds")
-                            or 15
+                            or max_shot
                         )
                         for sh in scene_shots
                         if isinstance(sh, dict)
                     )
                 )
             )
+        scene_dur = max(1, scene_dur or max_shot)
         scenes.append(
             {
                 "id": sid,
                 "order": int(sc.get("order") or index),
                 "title": title,
                 "description": desc or title,
-                "duration_seconds": max(5, scene_dur or 15),
+                "duration_seconds": scene_dur,
                 "status": "pending",
                 "narration": narration,
                 "voice_over": vo_norm,
             }
         )
-        if isinstance(scene_shots, list) and scene_shots:
-            for s_i, sh in enumerate(scene_shots, start=1):
-                if not isinstance(sh, dict):
-                    continue
-                shots.append(
-                    {
-                        "id": str(sh.get("id") or f"{sid}-shot-{s_i}"),
-                        "scene_id": sid,
-                        "order": int(sh.get("order") or s_i),
-                        "title": str(sh.get("title") or f"{title} / Shot {s_i}"),
-                        "description": str(sh.get("description") or desc or title),
-                        "status": "pending",
-                        "duration_seconds": float(
-                            clamp_clip_seconds(
-                                sh.get("durationSeconds")
-                                or sh.get("duration_seconds")
-                                or 15
-                            )
-                        ),
-                    }
-                )
-        else:
+        # Always split to max SHOT_DURATION_SECONDS; keep distinct beat text.
+        durs = plan_shot_durations(scene_dur, max_clip=max_shot)
+        for s_i, dur in enumerate(durs, start=1):
+            sh = (
+                scene_shots[s_i - 1]
+                if isinstance(scene_shots, list) and s_i - 1 < len(scene_shots)
+                else {}
+            )
+            if not isinstance(sh, dict):
+                sh = {}
+            raw_desc = str(sh.get("description") or "").strip()
+            if not raw_desc:
+                raw_desc = shot_beat_description(desc or title, s_i, len(durs))
+            elif s_i > 1 and isinstance(scene_shots, list) and scene_shots:
+                first = scene_shots[0] if isinstance(scene_shots[0], dict) else {}
+                if raw_desc == str(first.get("description") or "").strip():
+                    raw_desc = shot_beat_description(desc or title, s_i, len(durs))
             shots.append(
                 {
-                    "id": f"{sid}-shot-1",
+                    "id": str(sh.get("id") or f"{sid}-shot-{s_i}"),
                     "scene_id": sid,
-                    "order": 1,
-                    "title": f"{title} / Shot 1",
-                    "description": desc or title,
+                    "order": int(sh.get("order") or s_i),
+                    "title": str(sh.get("title") or f"{title} / Shot {s_i}"),
+                    "description": raw_desc,
                     "status": "pending",
-                    "duration_seconds": float(clamp_clip_seconds(scene_dur or 15)),
+                    "duration_seconds": float(dur),
                 }
             )
 
@@ -262,29 +269,154 @@ def load_director_plan_for_production(
     return plan, scenes, shots
 
 
-def locked_character_refs(project_id: str) -> list[dict[str, str]]:
-    """Return face-locked characters with reference image URLs from director plan."""
+def ordered_scene_ids(project_id: str) -> list[str]:
+    """Director / graph scene ids in story order."""
+    doc = get_project_doc(project_id) or {}
+    director = doc.get("director_response") or doc.get("directorResponse") or {}
+    ids: list[str] = []
+    if isinstance(director, dict):
+        scenes = director.get("scenes") or []
+        # Prefer explicit order field when present.
+        indexed: list[tuple[int, str]] = []
+        for i, sc in enumerate(scenes):
+            if not isinstance(sc, dict):
+                continue
+            sid = str(sc.get("id") or "").strip()
+            if not sid:
+                continue
+            order = sc.get("order")
+            try:
+                indexed.append((int(order), sid))
+            except (TypeError, ValueError):
+                indexed.append((i + 1, sid))
+        if indexed:
+            indexed.sort(key=lambda t: t[0])
+            ids = [sid for _, sid in indexed]
+    if ids:
+        return ids
+    try:
+        from app.orchestration.checkpointing import thread_config
+        from app.orchestration.graph import compile_graph
+
+        graph = compile_graph()
+        snapshot = graph.get_state(thread_config(project_id))
+        for scene in (snapshot.values or {}).get("scenes") or []:
+            sid = str(scene.get("id") or "").strip()
+            if sid:
+                ids.append(sid)
+    except Exception:
+        pass
+    return ids
+
+
+def first_scene_id(project_id: str) -> str | None:
+    ids = ordered_scene_ids(project_id)
+    return ids[0] if ids else None
+
+
+def _project_id_filter(project_id: str) -> dict[str, Any]:
+    from bson import ObjectId
+
+    clauses: list[dict[str, Any]] = [{"_id": project_id}]
+    if ObjectId.is_valid(project_id):
+        clauses.append({"_id": ObjectId(project_id)})
+    return {"$or": clauses}
+
+
+def clear_locked_look(project_id: str) -> None:
+    """Clear first-scene face lock so later scenes wait for a fresh still."""
+    from app.storage.asset_store import get_sync_db_from_settings
+
+    db = get_sync_db_from_settings()
+    db.projects.update_one(
+        _project_id_filter(project_id),
+        {"$unset": {"locked_look_scene_id": "", "locked_look_r2_key": ""}},
+    )
+
+
+def set_locked_look(project_id: str, *, scene_id: str, r2_key: str) -> None:
+    """Persist the starting-scene still used as face lock for later scenes."""
+    from app.storage.asset_store import get_sync_db_from_settings
+
+    db = get_sync_db_from_settings()
+    db.projects.update_one(
+        _project_id_filter(project_id),
+        {
+            "$set": {
+                "locked_look_scene_id": str(scene_id),
+                "locked_look_r2_key": str(r2_key),
+            }
+        },
+    )
+
+
+def get_locked_look(project_id: str) -> tuple[str | None, str | None]:
+    """Return (scene_id, r2_key) for the locked starting-scene face still."""
+    doc = get_project_doc(project_id) or {}
+    scene_id = str(doc.get("locked_look_scene_id") or "").strip() or None
+    r2_key = str(doc.get("locked_look_r2_key") or "").strip() or None
+    return scene_id, r2_key
+
+
+def list_characters(project_id: str) -> list[dict[str, str]]:
+    """All director characters (id/name/description/optional reference url)."""
     doc = get_project_doc(project_id) or {}
     director = doc.get("director_response") or doc.get("directorResponse") or {}
     if not isinstance(director, dict):
         return []
-    chars = director.get("characters") or []
     out: list[dict[str, str]] = []
-    for char in chars:
+    for char in director.get("characters") or []:
         if not isinstance(char, dict):
             continue
-        locked = bool(char.get("face_locked") or char.get("faceLocked"))
-        url = (
-            char.get("reference_image_url")
-            or char.get("referenceImageUrl")
-            or ""
-        ).strip()
+        name = str(char.get("name") or "").strip()
+        desc = str(char.get("description") or "").strip()
+        if not name and not desc:
+            continue
+        out.append(
+            {
+                "id": str(char.get("id") or ""),
+                "name": name or "Character",
+                "description": desc,
+                "url": (
+                    char.get("reference_image_url")
+                    or char.get("referenceImageUrl")
+                    or ""
+                ).strip(),
+                "face_locked": str(
+                    bool(char.get("face_locked") or char.get("faceLocked"))
+                ),
+            }
+        )
+    return out
+
+
+def character_bible_prompt(project_id: str) -> str:
+    """Stable look bible so Flux keeps the same faces across scenes (text-only)."""
+    chars = list_characters(project_id)
+    if not chars:
+        return ""
+    bits = []
+    for c in chars[:8]:
+        bits.append(f"{c['name']}: {c['description']}" if c["description"] else c["name"])
+    joined = " | ".join(bits)
+    return (
+        f"CHARACTER BIBLE (keep identical faces/costumes in every shot): {joined}. "
+        "Same age, skin tone, hairstyle, wardrobe, and facial features for each named person."
+    )
+
+
+def locked_character_refs(project_id: str) -> list[dict[str, str]]:
+    """Return face-locked characters with reference image URLs from director plan."""
+    out: list[dict[str, str]] = []
+    for char in list_characters(project_id):
+        locked = char.get("face_locked") == "True"
+        url = char.get("url") or ""
         if locked and url:
             out.append(
                 {
-                    "id": str(char.get("id") or ""),
-                    "name": str(char.get("name") or "Character"),
-                    "description": str(char.get("description") or ""),
+                    "id": char["id"],
+                    "name": char["name"],
+                    "description": char["description"],
                     "url": url,
                 }
             )

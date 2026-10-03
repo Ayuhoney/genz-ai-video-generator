@@ -11,18 +11,20 @@ from app.providers.base import (
     VideoProvider,
     VideoRequest,
 )
+from app.providers.fal.adapters import parse_model_chain
 from app.providers.fal.client import (
     FalAPIError,
     FalClient,
     extract_image_url,
-    extract_video_url,
 )
 from app.providers.fal.clip_timing import (
     clamp_clip_seconds,
-    motion_only_prompt,
     soft_visual_prompt,
-    wan_frame_args,
 )
+from app.providers.fal.errors import FalClipError
+from app.providers.fal.generate_clip import ClipGenerateRequest, generate_clip
+from app.workers import job_store
+from app.storage.asset_store import get_sync_db_from_settings
 
 
 def _fal_settings() -> Any:
@@ -66,6 +68,10 @@ def _estimate_video_cost(metrics: dict[str, Any], duration: float, s: Any) -> fl
     return float(s.fal_video_cost_usd or 0.0)
 
 
+def _disable_safety_checker(s: Any) -> bool:
+    return bool(getattr(s, "fal_disable_safety_checker", False))
+
+
 class FalImageProvider(ImageProvider):
     name = "fal"
 
@@ -75,10 +81,11 @@ class FalImageProvider(ImageProvider):
         if not model:
             raise FalAPIError("FAL_IMAGE_MODEL is required when PROVIDER_IMAGE=fal")
 
+        scene_text = (request.prompt or "").strip() or "cinematic scene still"
+        image_prompt_final = soft_visual_prompt(scene_text)
         arguments: dict[str, Any] = {
-            "prompt": soft_visual_prompt(request.prompt or "cinematic scene still"),
+            "prompt": image_prompt_final,
         }
-        # Common optional knobs — only send if present in extra / request.
         if request.width:
             arguments["image_size"] = {
                 "width": request.width,
@@ -89,12 +96,18 @@ class FalImageProvider(ImageProvider):
             for u in (request.reference_image_urls or [])
             if isinstance(u, str) and u.strip()
         ]
+        extra = dict(request.extra or {})
         if refs:
-            arguments["prompt"] = (
+            image_prompt_final = (
                 f"{arguments['prompt']}. Keep the exact same face identity "
                 f"as the locked character reference photo in every shot."
             )
-            model_l = model.lower()
+            arguments["prompt"] = image_prompt_final
+            i2i_model = (
+                str(extra.pop("i2i_model", None) or "").strip()
+                or str(getattr(s, "fal_image_i2i_model", "") or "").strip()
+            )
+            model_l = (i2i_model or model).lower()
             supports_ref = any(
                 token in model_l
                 for token in (
@@ -106,11 +119,20 @@ class FalImageProvider(ImageProvider):
                     "consistent-character",
                 )
             )
-            if supports_ref:
+            if supports_ref and i2i_model:
+                model = i2i_model
+            if supports_ref or "image-to-image" in model.lower():
                 arguments.setdefault("image_url", refs[0])
                 if len(refs) > 1:
                     arguments.setdefault("image_urls", refs)
-        arguments.update(request.extra or {})
+                strength = extra.pop("strength", None)
+                if strength is None:
+                    strength = getattr(s, "fal_image_i2i_strength", 0.65)
+                try:
+                    arguments.setdefault("strength", float(strength))
+                except (TypeError, ValueError):
+                    arguments.setdefault("strength", 0.65)
+        arguments.update(extra)
 
         with _make_client() as client:
             result, metrics = client.run(model, arguments)
@@ -127,9 +149,13 @@ class FalImageProvider(ImageProvider):
             filename="image.png" if "png" in content_type else "image.jpg",
             metadata={
                 "prompt": request.prompt,
+                "scene_text": scene_text,
+                "image_prompt_final": image_prompt_final,
+                "video_prompt_final": None,
                 "model": model,
                 "fal_metrics": metrics,
                 "source_url": url,
+                "reference_image_url": refs[0] if refs else None,
             },
             cost_usd=_estimate_image_cost(metrics, s),
             provider_name=self.name,
@@ -138,95 +164,118 @@ class FalImageProvider(ImageProvider):
 
 
 class FalVideoProvider(VideoProvider):
-    """Image-to-video via fal queue. Requires image_url (or image bytes to upload)."""
+    """Image-to-video via fal queue + generate_clip (model chain + budgets)."""
 
     name = "fal"
 
     def generate(self, request: VideoRequest) -> ProviderResult:
         s = _fal_settings()
-        model = (s.fal_video_model or "").strip()
-        if not model:
+        primary = (s.fal_video_model or "").strip()
+        if not primary:
             raise FalAPIError("FAL_VIDEO_MODEL is required when PROVIDER_VIDEO=fal")
+        chain = parse_model_chain(
+            getattr(s, "fal_video_model_chain", None),
+            primary=primary,
+        )
 
         duration = clamp_clip_seconds(
             request.duration_seconds,
-            default=int(getattr(s, "fal_video_clip_seconds", None) or 15),
+            default=int(
+                getattr(s, "shot_duration_seconds", None)
+                or getattr(s, "fal_video_clip_seconds", None)
+                or 5
+            ),
         )
-        image_url = (request.image_url or "").strip() or None
+        resolution = str(
+            (request.extra or {}).get("resolution")
+            or getattr(s, "fal_video_resolution", None)
+            or "480p"
+        )
+        clip_id = None
+        job_id = (request.extra or {}).get("job_id")
+        if request.project_id and (request.scene_id or request.shot_id):
+            clip_id = (
+                f"{request.project_id}:{request.scene_id or '_'}:{request.shot_id or '_'}"
+            )
+
+        extra = dict(request.extra or {})
+        extra.pop("prompt", None)
+        extra.pop("resolution", None)
+        extra.pop("job_id", None)
+
+        def on_state(state: str) -> None:
+            if not job_id:
+                return
+            try:
+                db = get_sync_db_from_settings()
+                job_store.update_job(db, str(job_id), status=state, clip_state=state)
+            except Exception:
+                pass
 
         with _make_client() as client:
-            if not image_url and request.image_bytes:
-                image_url = client.upload_bytes(
-                    request.image_bytes,
-                    content_type=request.image_mime or "image/png",
-                    file_name="scene.png",
+            try:
+                clip = generate_clip(
+                    client,
+                    ClipGenerateRequest(
+                        model_id=chain[0],
+                        prompt=request.prompt or "",
+                        image_bytes=request.image_bytes,
+                        image_mime=request.image_mime,
+                        image_url=request.image_url,
+                        duration_seconds=float(duration),
+                        resolution=resolution,
+                        disable_safety_checker=_disable_safety_checker(s),
+                        clip_id=str(clip_id) if clip_id else None,
+                        project_id=request.project_id,
+                        model_chain=chain,
+                        job_id=str(job_id) if job_id else None,
+                        extra=extra,
+                        on_state=on_state,
+                    ),
                 )
-            if not image_url:
-                raise FalAPIError(
-                    "FalVideoProvider requires image_url or image_bytes for image-to-video"
-                )
-
-            arguments: dict[str, Any] = {
-                "prompt": motion_only_prompt(request.prompt),
-                "image_url": image_url,
-            }
-            model_l = model.lower()
-            # Turbo WAN uses resolution/aspect — NOT num_frames/fps (those trip errors).
-            if "wan" in model_l and "turbo" in model_l:
-                res = str(
-                    (request.extra or {}).get("resolution")
-                    or getattr(s, "fal_video_resolution", None)
-                    or "480p"
-                )
-                arguments["resolution"] = res
-                arguments["aspect_ratio"] = "auto"
-                arguments["enable_prompt_expansion"] = False
-                arguments["acceleration"] = "regular"
-            elif "wan" in model_l:
-                arguments.update(wan_frame_args(duration))
+            except FalClipError:
+                raise
+            if str(clip.video_url).startswith("dry-run://"):
+                # Tiny valid-enough placeholder; zero fal spend.
+                data = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
+                content_type = "video/mp4"
             else:
-                arguments["duration"] = duration
-            # Merge extras last but never override safety-critical prompt.
-            extra = dict(request.extra or {})
-            extra.pop("prompt", None)
-            arguments.update(extra)
-            arguments["prompt"] = motion_only_prompt(request.prompt)
+                data = client.download(clip.video_url)
+                content_type = "video/mp4"
+                video = clip.result.get("video")
+                if isinstance(video, dict) and video.get("content_type"):
+                    content_type = str(video["content_type"])
 
-            result, metrics = client.run(model, arguments)
-            url = extract_video_url(result)
-            data = client.download(url)
-            content_type = "video/mp4"
-            video = result.get("video")
-            if isinstance(video, dict) and video.get("content_type"):
-                content_type = str(video["content_type"])
+        cost = _estimate_video_cost(clip.metrics, float(duration), s)
+        if clip.estimated_cost_usd and cost <= 0:
+            cost = clip.estimated_cost_usd
 
+        scene_text = (request.prompt or "").strip()
         return ProviderResult(
             data=data,
             mime_type=content_type,
             filename="clip.mp4",
             metadata={
-                "prompt": request.prompt,
-                "model": model,
-                "image_url": image_url,
+                "prompt": clip.prompt_used,
+                "scene_text": scene_text,
+                "image_prompt_final": None,
+                "video_prompt_final": clip.prompt_used,
+                "model": clip.model_id,
+                "model_chain": clip.model_chain_used,
+                "image_url": clip.image_url,
                 "requested_duration": duration,
                 "requested_duration_seconds": duration,
                 "planned_duration_seconds": duration,
-                "fal_args": {
-                    k: arguments.get(k)
-                    for k in (
-                        "num_frames",
-                        "frames_per_second",
-                        "num_interpolated_frames",
-                        "duration",
-                        "resolution",
-                    )
-                    if k in arguments
-                },
-                "fal_metrics": metrics,
-                "source_url": url,
+                "fal_request_id": clip.request_id,
+                "fal_attempts": clip.attempts,
+                "fal_prompt_sanitize_level": clip.prompt_sanitize_level,
+                "estimated_cost_usd": clip.estimated_cost_usd,
+                "fal_args": {"resolution": resolution},
+                "fal_metrics": clip.metrics,
+                "source_url": clip.video_url,
             },
-            cost_usd=_estimate_video_cost(metrics, float(duration), s),
+            cost_usd=cost,
             provider_name=self.name,
             duration_seconds=float(duration),
-            url=url,
+            url=clip.video_url,
         )

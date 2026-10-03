@@ -82,28 +82,32 @@ def mock_shots(
         return shots
 
     shots = []
-    from app.providers.fal.clip_timing import clamp_clip_seconds, clip_seconds_from_settings
+    from app.providers.fal.clip_timing import (
+        clip_seconds_from_settings,
+        plan_shot_durations,
+        shot_beat_description,
+    )
 
     try:
         from app.core.config import get_settings
 
         clip = clip_seconds_from_settings(get_settings())
     except Exception:
-        clip = 15
+        clip = 5
     for scene in scenes:
-        # One fal clip per shot — never longer than WAN max (~15s).
-        scene_dur = float(scene.get("duration_seconds") or clip)
-        shot_count = max(1, int(round(scene_dur / clip)))
-        for index in range(1, shot_count + 1):
+        scene_dur = int(round(float(scene.get("duration_seconds") or clip)))
+        durs = plan_shot_durations(scene_dur, max_clip=clip)
+        base = soft_desc(scene)
+        for index, dur in enumerate(durs, start=1):
             shots.append(
                 {
                     "id": f"{scene['id']}-shot-{index}",
                     "scene_id": scene["id"],
                     "order": index,
                     "title": f"{scene['title']} / Shot {index}",
-                    "description": soft_desc(scene),
+                    "description": shot_beat_description(base, index, len(durs)),
                     "status": "pending",
-                    "duration_seconds": float(clamp_clip_seconds(clip)),
+                    "duration_seconds": float(dur),
                 }
             )
     return shots

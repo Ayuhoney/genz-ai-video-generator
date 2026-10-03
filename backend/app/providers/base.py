@@ -106,9 +106,20 @@ class MusicRequest:
 class ProviderError(Exception):
     """Raised when all providers in the chain fail."""
 
-    def __init__(self, message: str, *, errors: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        errors: list[str] | None = None,
+        error_class: str | None = None,
+        fal_request_id: str | None = None,
+        fal_calls: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.errors = errors or []
+        self.error_class = error_class
+        self.fal_request_id = fal_request_id
+        self.fal_calls = fal_calls
 
 
 class ImageProvider(ABC):

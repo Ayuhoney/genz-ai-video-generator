@@ -119,23 +119,34 @@ def test_mock_provider_and_retry_wrapper() -> None:
 
 
 def test_registry_fallback_on_failure(monkeypatch) -> None:
+    """Mock is intentionally excluded from fallback chains — only real providers retry."""
+
     class BadImage(MockImageProvider):
         name = "bad"
 
         def generate(self, request: ImageRequest):
             raise RuntimeError("primary failed")
 
+    class OkImage(MockImageProvider):
+        name = "ok"
+
+        def generate(self, request: ImageRequest):
+            return super().generate(request)
+
     from app.providers import registry as reg
 
     monkeypatch.setitem(reg._IMAGE, "bad", BadImage)
+    monkeypatch.setitem(reg._IMAGE, "ok", OkImage)
     monkeypatch.setenv("PROVIDER_IMAGE", "bad")
-    monkeypatch.setenv("PROVIDER_IMAGE_FALLBACKS", "mock")
+    # "mock" in fallbacks is skipped; a real secondary provider should still run.
+    monkeypatch.setenv("PROVIDER_IMAGE_FALLBACKS", "mock,ok")
+    monkeypatch.setenv("ALLOW_MOCK", "true")
     get_settings.cache_clear()
     get_worker_settings.cache_clear()
     reset_registry()
 
     result = get_registry().generate_image(ImageRequest(project_id="p"))
-    assert result.provider_name == "mock"
+    assert result.provider_name == "ok"
 
 
 def test_registry_all_fail(monkeypatch) -> None:
@@ -172,7 +183,10 @@ def test_produce_image_records_asset_and_cost(orchestration_db, tmp_path, monkey
         project_id=project_id,
         task_type="image",
         scene_id="scene-1",
-        input_payload={"scene_id": "scene-1"},
+        input_payload={
+            "scene_id": "scene-1",
+            "prompt": "Rainy chai stall at dusk, warm bulbs, lonely bench",
+        },
     )
     output = produce_image(job)
     assert output["r2_key"].startswith(f"projects/{project_id}/")
@@ -198,14 +212,17 @@ def test_worker_image_task_uploads(orchestration_db, tmp_path, monkeypatch) -> N
         project_id=project_id,
         task_type="image",
         scene_id="scene-1",
-        input_payload={"scene_id": "scene-1"},
+        input_payload={
+            "scene_id": "scene-1",
+            "prompt": "Rainy chai stall at dusk, warm bulbs, lonely bench",
+        },
     )
     dispatch_jobs([job])
     settings = get_settings()
     db = job_store.get_db(settings.mongodb_url, settings.mongodb_db_name)
     saved = job_store.get_job(db, job["id"])
     assert saved is not None
-    assert saved["status"] == "succeeded"
+    assert saved["status"] in {"succeeded", "completed"}
     assert saved["output"]["r2_key"]
     assert saved.get("cost") is not None
 

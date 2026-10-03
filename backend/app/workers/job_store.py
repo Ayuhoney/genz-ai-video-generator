@@ -12,15 +12,34 @@ from pymongo.collection import Collection
 from pymongo.database import Database
 
 JobStatus = Literal[
+    "pending",
+    "uploading",
     "queued",
+    "generating",
     "running",
     "retrying",
-    "succeeded",
+    "completed",
+    "succeeded",  # legacy alias of completed
     "failed",
     "timed_out",
+    "needs_new_image",
+    "needs_new_prompt",
+    "failed_retryable",
 ]
 
-TERMINAL_STATUSES = frozenset({"succeeded", "failed", "timed_out"})
+SUCCESS_STATUSES = frozenset({"completed", "succeeded"})
+
+TERMINAL_STATUSES = frozenset(
+    {
+        "completed",
+        "succeeded",
+        "failed",
+        "timed_out",
+        "needs_new_image",
+        "needs_new_prompt",
+        "failed_retryable",
+    }
+)
 
 _client: MongoClient | None = None
 
@@ -115,9 +134,11 @@ def create_or_get_job(
     doc = {
         "_id": job_id,
         "idempotency_key": idempotency_key,
-        "status": "queued",
+        "status": "pending",
+        "clip_state": "pending",
         "progress": 0,
         "attempts": 0,
+        "estimated_cost_usd": None,
         "error": None,
         "created_at": now,
         "updated_at": now,
@@ -210,12 +231,17 @@ def mark_job_succeeded(
     return update_job(
         db,
         job_id,
-        status="succeeded",
+        status="completed",
+        clip_state="completed",
         progress=100,
         output=output,
         error=None,
         finished_at=_utcnow(),
     )
+
+
+def job_is_success(job: dict[str, Any] | None) -> bool:
+    return bool(job) and job.get("status") in SUCCESS_STATUSES
 
 
 def mark_job_failed(
@@ -224,14 +250,33 @@ def mark_job_failed(
     error: str,
     *,
     timed_out: bool = False,
+    status: JobStatus | None = None,
+    errors: list[str] | None = None,
+    error_class: str | None = None,
+    fal_request_id: str | None = None,
+    fal_calls: int | None = None,
 ) -> dict[str, Any] | None:
-    return update_job(
-        db,
-        job_id,
-        status="timed_out" if timed_out else "failed",
-        error=error,
-        finished_at=_utcnow(),
-    )
+    final: JobStatus
+    if status is not None:
+        final = status
+    elif timed_out:
+        final = "timed_out"
+    else:
+        final = "failed"
+    fields: dict[str, Any] = {
+        "status": final,
+        "error": error,
+        "finished_at": _utcnow(),
+    }
+    if errors is not None:
+        fields["errors"] = list(errors)
+    if error_class is not None:
+        fields["error_class"] = error_class
+    if fal_request_id is not None:
+        fields["fal_request_id"] = fal_request_id
+    if fal_calls is not None:
+        fields["fal_calls"] = fal_calls
+    return update_job(db, job_id, **fields)
 
 
 def jobs_all_terminal(db: Database, job_ids: list[str]) -> bool:
@@ -251,7 +296,15 @@ def jobs_any_failed(db: Database, job_ids: list[str]) -> bool:
         jobs_collection(db).count_documents(
             {
                 "_id": {"$in": job_ids},
-                "status": {"$in": ["failed", "timed_out"]},
+                "status": {
+                    "$in": [
+                        "failed",
+                        "timed_out",
+                        "needs_new_image",
+                        "needs_new_prompt",
+                        "failed_retryable",
+                    ]
+                },
             }
         )
         > 0

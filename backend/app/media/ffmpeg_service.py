@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -10,6 +11,11 @@ from pathlib import Path
 from app.media.ffmpeg_tools import run_ffmpeg
 from app.media.ffprobe import probe_file
 
+logger = logging.getLogger(__name__)
+
+# Flag shot when |actual - planned| exceeds this (seconds). No freeze-pad.
+DURATION_MISMATCH_SECONDS = 1.0
+
 
 @dataclass(slots=True)
 class SceneInputs:
@@ -17,12 +23,19 @@ class SceneInputs:
     narration: Path | None = None
     sfx: Path | None = None
     music: Path | None = None
-    # Planned scene length (seconds). When set, output is forced to this
-    # duration (trim if longer, freeze-pad if shorter) so short fal clips
-    # never shrink the final cut.
+    # Planned scene length (seconds). Used for mismatch checks only — output
+    # follows real clip lengths (no freeze-pad to force the plan).
     target_duration: float | None = None
     # Optional per-shot plan lengths (same order as shot_clips).
     shot_target_durations: list[float] | None = None
+
+
+@dataclass(slots=True)
+class NormalizeResult:
+    duration: float
+    duration_mismatch: bool = False
+    planned_seconds: float = 0.0
+    actual_seconds: float = 0.0
 
 
 class FFmpegValidationError(RuntimeError):
@@ -42,36 +55,44 @@ def _audio_chain(stream_ref: str, target_seconds: float, *, loop: bool, out: str
     )
 
 
-def _fit_clip_to_duration(
+def _normalize_clip(
     *,
     src: Path,
     dest: Path,
-    target_seconds: float,
+    planned_seconds: float,
     width: int,
     height: int,
     fps: int,
-) -> float:
-    """Scale/fps normalize a clip and force it to exactly target_seconds.
-
-    Short clips (e.g. fal WAN turbo ~5s) are freeze-padded; long clips trimmed.
-    """
-    target = max(0.1, float(target_seconds))
+) -> NormalizeResult:
+    """Scale/fps normalize. Trim if longer than plan; never freeze-pad shorter clips."""
+    planned = max(0.0, float(planned_seconds or 0.0))
     info = probe_file(src)
     actual = float(info.get("duration") or 0.0)
     if actual <= 0:
         raise FFmpegValidationError(f"Shot clip has no duration: {src}")
 
+    mismatch = bool(planned > 0 and abs(actual - planned) > DURATION_MISMATCH_SECONDS)
+    if mismatch:
+        logger.warning(
+            "shot duration mismatch planned=%.3fs actual=%.3fs path=%s (no freeze-pad)",
+            planned,
+            actual,
+            src,
+        )
+
     scale = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps},format=yuv420p"
     )
-    if actual + 0.08 >= target:
-        # Trim to plan length.
-        vf = f"{scale},trim=duration={target:.4f},setpts=PTS-STARTPTS"
+    # Trim only when clip overshoots the plan; otherwise keep native length.
+    out_dur = actual
+    if planned > 0 and actual > planned + 0.08:
+        out_dur = planned
+        vf = f"{scale},trim=duration={planned:.4f},setpts=PTS-STARTPTS"
+        time_args = ["-t", f"{planned:.4f}"]
     else:
-        # Hold last frame until plan length (covers short fal turbo clips).
-        pad = max(0.0, target - actual)
-        vf = f"{scale},tpad=stop_mode=clone:stop_duration={pad:.4f}"
+        vf = scale
+        time_args = []
 
     run_ffmpeg(
         [
@@ -86,33 +107,19 @@ def _fit_clip_to_duration(
             "veryfast",
             "-crf",
             "23",
-            "-t",
-            f"{target:.4f}",
+            *time_args,
             "-pix_fmt",
             "yuv420p",
             str(dest),
         ]
     )
     fitted = probe_file(dest)
-    return float(fitted.get("duration") or target)
-
-
-def _resolve_scene_target(
-    *,
-    fitted_sum: float,
-    plan_target: float | None,
-) -> float:
-    """Prefer director/plan duration; never shrink below fitted video sum."""
-    plan = float(plan_target or 0.0)
-    base = max(0.1, fitted_sum)
-    if plan <= 0:
-        return base
-    # Plan wins when it exceeds (or matches) actual clips — pad/trim to plan.
-    # If somehow plan is shorter than fitted clips we already trimmed per-shot,
-    # keep the fitted sum so we don't drop content unexpectedly.
-    if plan + 0.05 < base:
-        return base
-    return plan
+    return NormalizeResult(
+        duration=float(fitted.get("duration") or out_dur),
+        duration_mismatch=mismatch,
+        planned_seconds=planned,
+        actual_seconds=actual,
+    )
 
 
 def render_scene_video(
@@ -127,9 +134,7 @@ def render_scene_video(
 ) -> float:
     """Combine shot clips + narration + SFX + music into one scene MP4.
 
-    Video timeline is the master clock. Audio is padded/looped to match.
-    Planned ``target_duration`` (and optional per-shot targets) force exact
-    lengths so short generator clips cannot collapse the final cut.
+    Video timeline follows real (normalized) clip lengths — no freeze-pad.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     if not inputs.shot_clips:
@@ -140,7 +145,6 @@ def render_scene_video(
     while len(shot_plans) < n:
         shot_plans.append(0.0)
 
-    # Distribute scene plan across shots when per-shot plans are missing.
     scene_plan = float(inputs.target_duration or 0.0)
     missing = [i for i, d in enumerate(shot_plans) if d <= 0]
     if missing and scene_plan > 0:
@@ -150,24 +154,44 @@ def render_scene_video(
         for i in missing:
             shot_plans[i] = each
     elif missing:
-        # No plan: use each clip's native duration.
         for i in missing:
             probed = float(probe_file(inputs.shot_clips[i]).get("duration") or 1.0)
             shot_plans[i] = max(0.1, probed)
 
     normalized: list[Path] = []
     fitted_sum = 0.0
+    mismatch_flags: list[bool] = []
     for index, clip in enumerate(inputs.shot_clips):
         norm = work_dir / f"shot_norm_{index}.mp4"
-        fitted_sum += _fit_clip_to_duration(
+        result = _normalize_clip(
             src=clip,
             dest=norm,
-            target_seconds=shot_plans[index],
+            planned_seconds=shot_plans[index],
             width=width,
             height=height,
             fps=fps,
         )
+        fitted_sum += result.duration
+        mismatch_flags.append(result.duration_mismatch)
         normalized.append(norm)
+
+    # Expose flags for callers that inspect work_dir sidecar (optional).
+    flag_path = work_dir / "shot_duration_mismatch.json"
+    try:
+        import json
+
+        flag_path.write_text(
+            json.dumps(
+                {
+                    "mismatches": mismatch_flags,
+                    "any": any(mismatch_flags),
+                    "planned": shot_plans[:n],
+                }
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
     concat_list = work_dir / "shots.txt"
     concat_list.write_text(
@@ -189,24 +213,9 @@ def render_scene_video(
         ]
     )
 
-    probed_concat = float(probe_file(video_only).get("duration") or fitted_sum)
-    video_duration = _resolve_scene_target(
-        fitted_sum=probed_concat,
-        plan_target=inputs.target_duration,
+    video_duration = max(
+        0.1, float(probe_file(video_only).get("duration") or fitted_sum)
     )
-
-    # Final hard lock: if concat drifted from scene plan, fit once more.
-    if abs(probed_concat - video_duration) > 0.12:
-        locked = work_dir / "video_locked.mp4"
-        _fit_clip_to_duration(
-            src=video_only,
-            dest=locked,
-            target_seconds=video_duration,
-            width=width,
-            height=height,
-            fps=fps,
-        )
-        video_only = locked
 
     audio_specs: list[tuple[Path, bool, str]] = []
     for path, loop, tag in (
@@ -372,7 +381,6 @@ def validate_final_output(
                 f"Final duration {duration:.2f}s outside tolerance of "
                 f"{expected_duration:.2f}s (+/- {tolerance_seconds}s)"
             )
-    # Quick decode sanity check (first second).
     ffprobe = shutil.which("ffprobe")
     if ffprobe:
         proc = subprocess.run(

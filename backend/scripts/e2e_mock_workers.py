@@ -70,7 +70,7 @@ def main() -> int:
     ]
     job_ids = dispatch_shot_video_jobs(project_id, shots)
     jobs = wait_jobs(job_ids)
-    assert all(j and j["status"] == "succeeded" for j in jobs), jobs
+    assert all(j and j["status"] in {"succeeded", "completed"} for j in jobs), jobs
     assert all((j or {}).get("progress") == 100 for j in jobs)
     print("OK parallel shots + progress")
 

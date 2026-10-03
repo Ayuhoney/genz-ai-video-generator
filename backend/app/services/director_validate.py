@@ -20,13 +20,23 @@ from app.schemas.director import (
 
 
 def _clip_default() -> int:
+    from app.providers.fal.clip_timing import (
+        DEFAULT_CLIP_SECONDS,
+        clip_seconds_from_settings,
+    )
+
     try:
         from app.core.config import get_settings
-        from app.providers.fal.clip_timing import clip_seconds_from_settings
 
         return clip_seconds_from_settings(get_settings())
     except Exception:
-        return FAL_WAN_MAX_CLIP_SECONDS
+        pass
+    try:
+        from app.workers.settings import get_worker_settings
+
+        return clip_seconds_from_settings(get_worker_settings())
+    except Exception:
+        return DEFAULT_CLIP_SECONDS
 
 
 def _is_cinematic_script(script: str) -> bool:
@@ -198,7 +208,7 @@ def apply_exact_durations(
             if diff > 0 and durations[idx] < clip:
                 durations[idx] += 1
                 diff -= 1
-            elif diff < 0 and durations[idx] > 5:
+            elif diff < 0 and durations[idx] > 1:
                 durations[idx] -= 1
                 diff += 1
             guard += 1

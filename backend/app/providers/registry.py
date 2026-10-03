@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar
 
 from app.providers.base import (
     ImageProvider,
@@ -194,6 +194,7 @@ def _run_chain(
     primaries, fallbacks, timeout, max_retries = _resolve_settings()
     names = _chain(primaries[kind], fallbacks[kind])
     errors: list[str] = []
+    last_exc: Exception | None = None
     try:
         from app.core.config import get_settings
 
@@ -229,9 +230,30 @@ def _run_chain(
             return result
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{name}: {exc}")
+            last_exc = exc
+    extra: dict[str, Any] = {}
+    if last_exc is not None:
+        ec = getattr(last_exc, "error_class", None)
+        if ec is None:
+            info = getattr(last_exc, "error_info", None)
+            ec = getattr(info, "error_class", None) if info is not None else None
+        if ec is not None:
+            extra["error_class"] = ec.value if hasattr(ec, "value") else str(ec)
+        rid = getattr(last_exc, "fal_request_id", None)
+        if rid is None:
+            info = getattr(last_exc, "info", None) or getattr(
+                last_exc, "error_info", None
+            )
+            rid = getattr(info, "request_id", None) if info is not None else None
+        if rid:
+            extra["fal_request_id"] = str(rid)
+        calls = getattr(last_exc, "fal_calls", None)
+        if calls is not None:
+            extra["fal_calls"] = int(calls)
     raise ProviderError(
         f"All {kind} providers failed: {names}",
         errors=errors,
+        **extra,
     )
 
 

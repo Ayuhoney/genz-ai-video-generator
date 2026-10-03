@@ -143,21 +143,103 @@ def test_fal_image_provider_mocked(monkeypatch) -> None:
     assert result.cost_usd > 0
 
 
+def test_fal_image_provider_switches_to_i2i_with_refs(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("FAL_IMAGE_I2I_MODEL", "fal-ai/flux/dev/image-to-image")
+    monkeypatch.setenv("FAL_IMAGE_I2I_STRENGTH", "0.55")
+    get_settings.cache_clear()
+    get_worker_settings.cache_clear()
+
+    class FakeClient(FalClient):
+        def __init__(self, *a, **k):
+            super().__init__("test-fal-key", poll_interval=0.01, poll_timeout=5)
+
+        def run(self, model: str, arguments: dict, **kwargs):
+            captured["model"] = model
+            captured["arguments"] = arguments
+            return (
+                {
+                    "images": [
+                        {
+                            "url": "https://cdn.example/out.png",
+                            "content_type": "image/png",
+                        }
+                    ]
+                },
+                {"inference_time": 1.0},
+            )
+
+        def download(self, url: str) -> bytes:
+            return b"PNGDATA"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        "app.providers.fal.image_video._make_client",
+        lambda: FakeClient(),
+    )
+    result = FalImageProvider().generate(
+        ImageRequest(
+            project_id="p1",
+            prompt="scene two outdoor",
+            reference_image_urls=["https://fal.media/files/locked-look.jpg"],
+            extra={"strength": 0.55},
+        )
+    )
+    assert result.data == b"PNGDATA"
+    assert captured["model"] == "fal-ai/flux/dev/image-to-image"
+    args = captured["arguments"]
+    assert isinstance(args, dict)
+    assert args["image_url"] == "https://fal.media/files/locked-look.jpg"
+    assert args["strength"] == 0.55
+
+
+def test_first_scene_id_orders_by_director(monkeypatch) -> None:
+    from app.workers import project_context as pc
+
+    monkeypatch.setattr(
+        pc,
+        "get_project_doc",
+        lambda _pid: {
+            "director_response": {
+                "scenes": [
+                    {"id": "s2", "order": 2},
+                    {"id": "s1", "order": 1},
+                ]
+            }
+        },
+    )
+    assert pc.ordered_scene_ids("p1") == ["s1", "s2"]
+    assert pc.first_scene_id("p1") == "s1"
+
+
 def test_fal_video_provider_i2v_mocked(monkeypatch) -> None:
     states = {"n": 0}
+    model = "fal-ai/wan/v2.2-a14b/image-to-video/turbo"
+    monkeypatch.setenv("FAL_VIDEO_MODEL", model)
+    monkeypatch.setenv("FAL_VIDEO_MODEL_CHAIN", model)
+    get_settings.cache_clear()
+    get_worker_settings.cache_clear()
 
     def video_route(request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if request.method == "POST" and "test-video-model" in path:
+        if request.method == "POST" and "image-to-video/turbo" in path:
             body = request.read()
             assert b"image_url" in body
-            assert b"duration" in body
+            assert b"resolution" in body
+            assert b"num_frames" not in body
             return httpx.Response(
                 200,
                 json={
                     "request_id": "v1",
-                    "status_url": "https://queue.fal.run/test-owner/test-video-model/requests/v1/status",
-                    "response_url": "https://queue.fal.run/test-owner/test-video-model/requests/v1",
+                    "status_url": (
+                        "https://queue.fal.run/fal-ai/wan/requests/v1/status"
+                    ),
+                    "response_url": "https://queue.fal.run/fal-ai/wan/requests/v1",
                 },
             )
         if path.endswith("/status"):
@@ -190,9 +272,36 @@ def test_fal_video_provider_i2v_mocked(monkeypatch) -> None:
         def download(self, url: str) -> bytes:
             return b"MP4DATA"
 
+        def upload_bytes(self, data, *, content_type, file_name="x"):
+            return "https://v3b.fal.media/files/test/scene.png"
+
     monkeypatch.setattr(
         "app.providers.fal.image_video._make_client",
         lambda: FakeClient("test-fal-key"),
+    )
+    monkeypatch.setattr(
+        "app.providers.fal.generate_clip.idempotency_claim",
+        lambda _cid: None,
+    )
+    monkeypatch.setattr(
+        "app.providers.fal.generate_clip.idempotency_bind",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "app.providers.fal.generate_clip.enforce_job_budget",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "app.providers.fal.generate_clip.ensure_project_not_paused",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "app.providers.fal.generate_clip.bump_circuit_breaker",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "app.providers.fal.generate_clip.record_clip_cost_log",
+        lambda **_k: None,
     )
     result = FalVideoProvider().generate(
         VideoRequest(
@@ -204,7 +313,7 @@ def test_fal_video_provider_i2v_mocked(monkeypatch) -> None:
     )
     assert result.data == b"MP4DATA"
     assert result.duration_seconds == 5
-    assert result.metadata["model"] == "test-owner/test-video-model"
+    assert result.metadata["model"] == model
 
 
 def test_fal_requires_model_env(monkeypatch) -> None:

@@ -45,6 +45,7 @@ class WorkerSettings(BaseSettings):
         default=0.05,
         alias="MOCK_TASK_SLEEP_SECONDS",
     )
+    allow_mock: bool = Field(default=False, alias="ALLOW_MOCK")
 
     r2_account_id: str | None = Field(default=None, alias="R2_ACCOUNT_ID")
     r2_access_key_id: str | None = Field(default=None, alias="R2_ACCESS_KEY_ID")
@@ -76,6 +77,18 @@ class WorkerSettings(BaseSettings):
 
     fal_key: str | None = Field(default=None, alias="FAL_KEY")
     fal_image_model: str | None = Field(default=None, alias="FAL_IMAGE_MODEL")
+    fal_image_i2i_model: str = Field(
+        default="fal-ai/flux/dev/image-to-image",
+        alias="FAL_IMAGE_I2I_MODEL",
+    )
+    fal_image_i2i_strength: float = Field(
+        default=0.65,
+        alias="FAL_IMAGE_I2I_STRENGTH",
+    )
+    fal_look_lock_wait_seconds: float = Field(
+        default=600.0,
+        alias="FAL_LOOK_LOCK_WAIT_SECONDS",
+    )
     fal_video_model: str | None = Field(default=None, alias="FAL_VIDEO_MODEL")
     fal_webhook_url: str | None = Field(default=None, alias="FAL_WEBHOOK_URL")
     fal_poll_interval_seconds: float = Field(
@@ -101,7 +114,25 @@ class WorkerSettings(BaseSettings):
     fal_sfx_model: str | None = Field(default=None, alias="FAL_SFX_MODEL")
     fal_music_model: str | None = Field(default=None, alias="FAL_MUSIC_MODEL")
     fal_video_resolution: str = Field(default="480p", alias="FAL_VIDEO_RESOLUTION")
-    fal_video_clip_seconds: int = Field(default=15, alias="FAL_VIDEO_CLIP_SECONDS")
+    fal_video_clip_seconds: int = Field(default=5, alias="FAL_VIDEO_CLIP_SECONDS")
+    shot_duration_seconds: int = Field(default=5, alias="SHOT_DURATION_SECONDS")
+    fal_disable_safety_checker: bool = Field(
+        default=False,
+        alias="FAL_DISABLE_SAFETY_CHECKER",
+    )
+    fal_video_model_chain: str = Field(
+        default=(
+            "fal-ai/wan/v2.2-a14b/image-to-video/turbo,"
+            "fal-ai/wan/v2.2-a14b/image-to-video"
+        ),
+        alias="FAL_VIDEO_MODEL_CHAIN",
+    )
+    job_max_usd: float = Field(default=5.0, alias="JOB_MAX_USD")
+    dry_run: bool = Field(default=False, alias="DRY_RUN")
+    fal_prompt_blocked_words: str = Field(
+        default="",
+        alias="FAL_PROMPT_BLOCKED_WORDS",
+    )
     fal_sfx_cost_usd: float = Field(default=0.006, alias="FAL_SFX_COST_USD")
     fal_music_cost_usd: float = Field(default=0.01, alias="FAL_MUSIC_COST_USD")
     sarvam_key: str | None = Field(default=None, alias="SARVAM_KEY")
