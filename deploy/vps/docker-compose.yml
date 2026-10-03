@@ -1,5 +1,12 @@
 # Isolated stack — does NOT touch /opt/genzcine or existing containers.
+# Redis: host Redis DB /2 via host.docker.internal (no compose Redis service).
 name: genzai-video
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
 
 services:
   media:
@@ -14,11 +21,50 @@ services:
       - ./nginx-media.conf:/etc/nginx/conf.d/default.conf:ro
     networks:
       - genzai-net
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    logging: *default-logging
+
+  api:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile.worker
+    image: genzai-video-worker:local
+    container_name: genzai-video-api
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - .env
+    environment:
+      # Host Redis DB /2 (password from REDIS_PASSWORD in .env).
+      REDIS_URL: redis://:${REDIS_PASSWORD}@host.docker.internal:6379/2
+      REDIS_SSL_CERT_REQS: none
+      MEDIA_LOCAL_ROOT: /data/media
+      R2_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL:-http://200.234.41.50:9100}
+      CELERY_TASK_ALWAYS_EAGER: "false"
+    ports:
+      # Restrict :8000 to your IP with the host firewall.
+      - "8000:8000"
+    volumes:
+      - genzai_media:/data/media
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - genzai-net
+    depends_on:
+      media:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+    logging: *default-logging
 
   worker:
     build:
@@ -30,9 +76,10 @@ services:
     env_file:
       - .env
     environment:
-      # Host Redis (already running on VPS). DB /2 = isolated for this app.
       REDIS_URL: redis://:${REDIS_PASSWORD}@host.docker.internal:6379/2
       REDIS_SSL_CERT_REQS: none
+      # Worker → API job-complete callbacks (internal).
+      API_BASE_URL: http://api:8000
       MEDIA_LOCAL_ROOT: /data/media
       R2_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL:-http://200.234.41.50:9100}
       CELERY_TASK_ALWAYS_EAGER: "false"
@@ -47,12 +94,11 @@ services:
     networks:
       - genzai-net
     depends_on:
-      - media
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "5"
+      api:
+        condition: service_healthy
+      media:
+        condition: service_started
+    logging: *default-logging
 
 volumes:
   genzai_media:
