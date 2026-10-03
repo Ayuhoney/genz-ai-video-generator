@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.media.ffmpeg_tools import run_ffmpeg
@@ -16,18 +16,38 @@ logger = logging.getLogger(__name__)
 # Flag shot when |actual - planned| exceeds this (seconds). No freeze-pad.
 DURATION_MISMATCH_SECONDS = 1.0
 
+DEFAULT_MUSIC_VOLUME = 0.30
+DEFAULT_SFX_VOLUME = 0.22
+DEFAULT_VOICE_VOLUME = 1.0
+DEFAULT_LOUDNORM_I = -16.0
+DEFAULT_SCENE_CROSSFADE = 0.4
+
+
+@dataclass(slots=True)
+class VoiceLineInput:
+    """One dialogue line placed on the scene timeline."""
+
+    path: Path
+    start_seconds: float
+    duration_seconds: float = 0.0
+    line_id: str = ""
+
 
 @dataclass(slots=True)
 class SceneInputs:
     shot_clips: list[Path]
-    narration: Path | None = None
+    narration: Path | None = None  # legacy single-file fallback
+    voice_lines: list[VoiceLineInput] = field(default_factory=list)
     sfx: Path | None = None
     music: Path | None = None
-    # Planned scene length (seconds). Used for mismatch checks only — output
-    # follows real clip lengths (no freeze-pad to force the plan).
+    # Planned scene length (seconds). Used for mismatch / overflow checks.
     target_duration: float | None = None
     # Optional per-shot plan lengths (same order as shot_clips).
     shot_target_durations: list[float] | None = None
+    music_volume: float = DEFAULT_MUSIC_VOLUME
+    sfx_volume: float = DEFAULT_SFX_VOLUME
+    voice_volume: float = DEFAULT_VOICE_VOLUME
+    loudnorm_i: float = DEFAULT_LOUDNORM_I
 
 
 @dataclass(slots=True)
@@ -42,17 +62,95 @@ class FFmpegValidationError(RuntimeError):
     pass
 
 
-def _audio_chain(stream_ref: str, target_seconds: float, *, loop: bool, out: str) -> str:
-    t = max(0.1, float(target_seconds))
-    if loop:
-        return (
-            f"{stream_ref}aloop=loop=-1:size=2e+09,atrim=0:{t},"
-            f"asetpts=PTS-STARTPTS{out}"
+def build_scene_mix_filter(
+    *,
+    voice_count: int,
+    has_sfx: bool,
+    has_music: bool,
+    mix_duration: float,
+    music_volume: float = DEFAULT_MUSIC_VOLUME,
+    sfx_volume: float = DEFAULT_SFX_VOLUME,
+    voice_volume: float = DEFAULT_VOICE_VOLUME,
+    loudnorm_i: float = DEFAULT_LOUDNORM_I,
+    voice_starts_ms: list[int] | None = None,
+    fade_seconds: float = 0.25,
+) -> str:
+    """Build filter_complex for voice timeline + ducked music + loudnorm.
+
+    Input layout: 0=video, 1..V=voice lines, then optional sfx, then optional music.
+    Requires voice_count >= 1 (caller handles sfx/music-only separately).
+    """
+    if voice_count < 1:
+        raise ValueError("build_scene_mix_filter requires at least one voice line")
+
+    t = max(0.1, float(mix_duration))
+    starts = list(voice_starts_ms or [0] * voice_count)
+    while len(starts) < voice_count:
+        starts.append(0)
+
+    parts: list[str] = []
+    voice_labels: list[str] = []
+    idx = 1
+    for i in range(voice_count):
+        delay = max(0, int(starts[i]))
+        lab = f"v{i}"
+        parts.append(
+            f"[{idx}:a]aresample=44100,aformat=channel_layouts=stereo,"
+            f"volume={float(voice_volume):.3f},"
+            f"adelay={delay}|{delay},apad[{lab}]"
         )
-    return (
-        f"{stream_ref}atrim=0:{t},asetpts=PTS-STARTPTS,"
-        f"apad=whole_dur={t}{out}"
+        voice_labels.append(f"[{lab}]")
+        idx += 1
+
+    if voice_count == 1:
+        parts.append(f"{voice_labels[0]}volume=1[voice]")
+    else:
+        mix_in = "".join(voice_labels)
+        parts.append(
+            f"{mix_in}amix=inputs={voice_count}:duration=longest:normalize=0,"
+            f"atrim=0:{t:.4f},asetpts=PTS-STARTPTS[voice]"
+        )
+
+    parts.append("[voice]asplit=2[vo_mix][vo_sc]")
+    mix_inputs = ["[vo_mix]"]
+    n_mix = 1
+
+    if has_sfx:
+        parts.append(
+            f"[{idx}:a]aresample=44100,aformat=channel_layouts=stereo,"
+            f"aloop=loop=-1:size=2e+09,atrim=0:{t:.4f},asetpts=PTS-STARTPTS,"
+            f"volume={float(sfx_volume):.3f}[sfx]"
+        )
+        mix_inputs.append("[sfx]")
+        n_mix += 1
+        idx += 1
+
+    if has_music:
+        parts.append(
+            f"[{idx}:a]aresample=44100,aformat=channel_layouts=stereo,"
+            f"aloop=loop=-1:size=2e+09,atrim=0:{t:.4f},asetpts=PTS-STARTPTS,"
+            f"volume={float(music_volume):.3f},"
+            f"afade=t=in:st=0:d={min(0.5, t / 4):.3f}[mu_raw]"
+        )
+        parts.append(
+            "[mu_raw][vo_sc]sidechaincompress="
+            "threshold=0.03:ratio=8:attack=20:release=300[mu_duck]"
+        )
+        mix_inputs.append("[mu_duck]")
+        n_mix += 1
+    else:
+        parts.append("[vo_sc]anullsink")
+
+    fade_out_st = max(0.0, t - float(fade_seconds))
+    mix_in = "".join(mix_inputs)
+    parts.append(
+        f"{mix_in}amix=inputs={n_mix}:duration=first:dropout_transition=0:normalize=0,"
+        f"atrim=0:{t:.4f},asetpts=PTS-STARTPTS,"
+        f"afade=t=in:st=0:d={float(fade_seconds):.3f},"
+        f"afade=t=out:st={fade_out_st:.4f}:d={float(fade_seconds):.3f},"
+        f"loudnorm=I={float(loudnorm_i):.1f}:TP=-1.5:LRA=11[aout]"
     )
+    return ";".join(parts)
 
 
 def _normalize_clip(
@@ -84,7 +182,6 @@ def _normalize_clip(
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps},format=yuv420p"
     )
-    # Trim only when clip overshoots the plan; otherwise keep native length.
     out_dur = actual
     if planned > 0 and actual > planned + 0.08:
         out_dur = planned
@@ -132,9 +229,10 @@ def render_scene_video(
     fps: int = 24,
     fade_seconds: float = 0.25,
 ) -> float:
-    """Combine shot clips + narration + SFX + music into one scene MP4.
+    """Combine shot clips + per-line voice + SFX + theme music into one scene MP4.
 
-    Video timeline follows real (normalized) clip lengths — no freeze-pad.
+    Voice lines are placed on a timeline (never silently trimmed). If voice runs
+    longer than the video, the scene is extended (tpad) and overflow is flagged.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     if not inputs.shot_clips:
@@ -175,7 +273,6 @@ def render_scene_video(
         mismatch_flags.append(result.duration_mismatch)
         normalized.append(norm)
 
-    # Expose flags for callers that inspect work_dir sidecar (optional).
     flag_path = work_dir / "shot_duration_mismatch.json"
     try:
         import json
@@ -217,27 +314,98 @@ def render_scene_video(
         0.1, float(probe_file(video_only).get("duration") or fitted_sum)
     )
 
-    audio_specs: list[tuple[Path, bool, str]] = []
-    for path, loop, tag in (
-        (inputs.narration, False, "narr"),
-        (inputs.sfx, True, "sfx"),
-        (inputs.music, True, "mus"),
-    ):
-        if path is not None:
-            audio_specs.append((path, loop, tag))
+    # Resolve voice lines (new path) or legacy single narration.
+    voice_lines = list(inputs.voice_lines or [])
+    if not voice_lines and inputs.narration is not None:
+        narr_dur = float(probe_file(inputs.narration).get("duration") or 0.0)
+        voice_lines = [
+            VoiceLineInput(
+                path=inputs.narration,
+                start_seconds=0.0,
+                duration_seconds=narr_dur,
+                line_id="narration",
+            )
+        ]
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    # Never use -shortest: audio must stretch to the video timeline.
+    voice_end = 0.0
+    for vl in voice_lines:
+        dur = float(vl.duration_seconds or 0.0)
+        if dur <= 0:
+            dur = float(probe_file(vl.path).get("duration") or 0.01)
+        voice_end = max(voice_end, float(vl.start_seconds) + dur)
 
-    if not audio_specs:
+    scene_target = scene_plan if scene_plan > 0 else video_duration
+    overflow = bool(voice_lines) and voice_end > scene_target + 1e-6
+    overflow_by = max(0.0, voice_end - scene_target) if overflow else 0.0
+    # Never cut lines: extend mix (and video) to fit the full voice timeline.
+    mix_duration = max(video_duration, voice_end, 0.1)
+
+    overflow_path = work_dir / "voice_overflow.json"
+    try:
+        import json
+
+        overflow_path.write_text(
+            json.dumps(
+                {
+                    "overflow": overflow,
+                    "overflow_seconds": round(overflow_by, 4),
+                    "voice_end_seconds": round(voice_end, 4),
+                    "scene_duration_seconds": round(scene_target, 4),
+                    "mix_duration_seconds": round(mix_duration, 4),
+                    "line_count": len(voice_lines),
+                }
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+    if overflow:
+        logger.warning(
+            "voice overflow scene_plan=%.3fs voice_end=%.3fs (+%.3fs) — "
+            "extending mix; lines were NOT cut",
+            scene_target,
+            voice_end,
+            overflow_by,
+        )
+
+    # Pad video if voice needs a longer timeline.
+    video_for_mix = video_only
+    if mix_duration > video_duration + 0.05:
+        pad = mix_duration - video_duration
+        padded = work_dir / "video_padded.mp4"
         run_ffmpeg(
             [
                 "-i",
                 str(video_only),
+                "-vf",
+                f"tpad=stop_mode=clone:stop_duration={pad:.4f}",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+                "-pix_fmt",
+                "yuv420p",
+                "-t",
+                f"{mix_duration:.4f}",
+                str(padded),
+            ]
+        )
+        video_for_mix = padded
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not voice_lines and inputs.sfx is None and inputs.music is None:
+        run_ffmpeg(
+            [
+                "-i",
+                str(video_for_mix),
                 "-f",
                 "lavfi",
                 "-i",
-                f"anullsrc=r=44100:cl=stereo:d={video_duration:.4f}",
+                f"anullsrc=r=44100:cl=stereo:d={mix_duration:.4f}",
                 "-map",
                 "0:v:0",
                 "-map",
@@ -255,32 +423,70 @@ def render_scene_video(
                 "-b:a",
                 "128k",
                 "-t",
-                f"{video_duration:.4f}",
+                f"{mix_duration:.4f}",
                 "-movflags",
                 "+faststart",
                 str(output_path),
             ]
         )
     else:
-        filter_parts: list[str] = []
-        mix_labels: list[str] = []
-        cmd = ["-i", str(video_only)]
-        for audio_index, (path, loop, tag) in enumerate(audio_specs, start=1):
-            cmd.extend(["-i", str(path)])
-            out = f"[a{tag}]"
-            filter_parts.append(
-                _audio_chain(f"[{audio_index}:a]", video_duration, loop=loop, out=out)
-            )
-            mix_labels.append(out)
-        mix_in = "".join(mix_labels)
-        filter_complex = (
-            ";".join(filter_parts)
-            + f";{mix_in}amix=inputs={len(mix_labels)}:duration=first:dropout_transition=0,"
-            f"atrim=0:{video_duration:.4f},asetpts=PTS-STARTPTS,"
-            f"afade=t=in:st=0:d={fade_seconds},"
-            f"afade=t=out:st={max(0.0, video_duration - fade_seconds):.4f}:d={fade_seconds},"
-            "dynaudnorm=f=75:g=15[aout]"
+        cmd = ["-i", str(video_for_mix)]
+        starts_ms: list[int] = []
+        for vl in voice_lines:
+            cmd.extend(["-i", str(vl.path)])
+            starts_ms.append(int(round(max(0.0, float(vl.start_seconds)) * 1000)))
+        has_sfx = inputs.sfx is not None
+        has_music = inputs.music is not None
+        if has_sfx:
+            cmd.extend(["-i", str(inputs.sfx)])
+        if has_music:
+            cmd.extend(["-i", str(inputs.music)])
+
+        filter_complex = build_scene_mix_filter(
+            voice_count=len(voice_lines),
+            has_sfx=has_sfx,
+            has_music=has_music,
+            mix_duration=mix_duration,
+            music_volume=inputs.music_volume,
+            sfx_volume=inputs.sfx_volume,
+            voice_volume=inputs.voice_volume,
+            loudnorm_i=inputs.loudnorm_i,
+            voice_starts_ms=starts_ms,
+            fade_seconds=fade_seconds,
         )
+        # When no voice lines, build_scene_mix_filter starts with anullsrc — that
+        # needs to be a lavfi input, not referenced from missing indices.
+        if not voice_lines:
+            # Rebuild simpler path: sfx/music only with loudnorm.
+            filter_parts: list[str] = []
+            mix_labels: list[str] = []
+            next_i = 1
+            if has_sfx:
+                filter_parts.append(
+                    f"[{next_i}:a]aresample=44100,aformat=channel_layouts=stereo,"
+                    f"aloop=loop=-1:size=2e+09,atrim=0:{mix_duration:.4f},"
+                    f"asetpts=PTS-STARTPTS,volume={inputs.sfx_volume:.3f}[sfx]"
+                )
+                mix_labels.append("[sfx]")
+                next_i += 1
+            if has_music:
+                filter_parts.append(
+                    f"[{next_i}:a]aresample=44100,aformat=channel_layouts=stereo,"
+                    f"aloop=loop=-1:size=2e+09,atrim=0:{mix_duration:.4f},"
+                    f"asetpts=PTS-STARTPTS,volume={inputs.music_volume:.3f}[mus]"
+                )
+                mix_labels.append("[mus]")
+            fade_out_st = max(0.0, mix_duration - fade_seconds)
+            filter_complex = (
+                ";".join(filter_parts)
+                + f";{''.join(mix_labels)}amix=inputs={len(mix_labels)}:"
+                f"duration=first:dropout_transition=0:normalize=0,"
+                f"atrim=0:{mix_duration:.4f},asetpts=PTS-STARTPTS,"
+                f"afade=t=in:st=0:d={fade_seconds:.3f},"
+                f"afade=t=out:st={fade_out_st:.4f}:d={fade_seconds:.3f},"
+                f"loudnorm=I={inputs.loudnorm_i:.1f}:TP=-1.5:LRA=11[aout]"
+            )
+
         cmd.extend(
             [
                 "-filter_complex",
@@ -302,7 +508,7 @@ def render_scene_video(
                 "-b:a",
                 "192k",
                 "-t",
-                f"{video_duration:.4f}",
+                f"{mix_duration:.4f}",
                 "-movflags",
                 "+faststart",
                 str(output_path),
@@ -320,24 +526,83 @@ def assemble_final_video(
     *,
     scene_videos: list[Path],
     output_path: Path,
+    audio_crossfade_seconds: float = DEFAULT_SCENE_CROSSFADE,
 ) -> float:
-    """Concatenate scene videos in order (re-encode for consistent codecs)."""
+    """Concatenate scenes with 0.4s audio (and matching video) crossfade."""
     if not scene_videos:
         raise ValueError("Final assembly requires at least one scene video")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    list_file = output_path.parent / "scenes_concat.txt"
-    list_file.write_text(
-        "".join(f"file '{p.resolve()}'\n" for p in scene_videos),
-        encoding="utf-8",
-    )
-    run_ffmpeg(
+    xfade = max(0.0, float(audio_crossfade_seconds))
+
+    if len(scene_videos) == 1 or xfade <= 0:
+        list_file = output_path.parent / "scenes_concat.txt"
+        list_file.write_text(
+            "".join(f"file '{p.resolve()}'\n" for p in scene_videos),
+            encoding="utf-8",
+        )
+        run_ffmpeg(
+            [
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_file),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
+        )
+        return float(probe_file(output_path)["duration"])
+
+    # Chain xfade + acrossfade across all scenes.
+    durations = [
+        max(0.1, float(probe_file(p).get("duration") or 0.1)) for p in scene_videos
+    ]
+    cmd: list[str] = []
+    for path in scene_videos:
+        cmd.extend(["-i", str(path)])
+
+    v_label = "[0:v]"
+    a_label = "[0:a]"
+    parts: list[str] = []
+    running = durations[0]
+    for i in range(1, len(scene_videos)):
+        offset = max(0.0, running - xfade)
+        v_out = f"[vx{i}]"
+        a_out = f"[ax{i}]"
+        parts.append(
+            f"{v_label}[{i}:v]xfade=transition=fade:duration={xfade:.3f}:"
+            f"offset={offset:.4f}{v_out}"
+        )
+        parts.append(
+            f"{a_label}[{i}:a]acrossfade=d={xfade:.3f}:c1=tri:c2=tri{a_out}"
+        )
+        v_label = v_out
+        a_label = a_out
+        running = running + durations[i] - xfade
+
+    filter_complex = ";".join(parts)
+    cmd.extend(
         [
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(list_file),
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            v_label,
+            "-map",
+            a_label,
             "-c:v",
             "libx264",
             "-preset",
@@ -355,6 +620,7 @@ def assemble_final_video(
             str(output_path),
         ]
     )
+    run_ffmpeg(cmd)
     info = probe_file(output_path)
     return float(info["duration"])
 

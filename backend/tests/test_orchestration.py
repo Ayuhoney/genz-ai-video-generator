@@ -174,10 +174,10 @@ async def test_production_api_start_status_resume(
     assert started.status_code == 202
     assert started.json()["status"] == "accepted"
 
-    # Wait for background pause.
+    # Wait for background pause (more stills now: one image job per shot).
     from app.orchestration.runner import wait_until_idle
 
-    await wait_until_idle(project_id, timeout=15)
+    await wait_until_idle(project_id, timeout=60)
 
     status = await client.get(
         f"/api/projects/{project_id}/production/status",
@@ -195,7 +195,7 @@ async def test_production_api_start_status_resume(
         headers=headers,
     )
     assert resumed.status_code == 202
-    await wait_until_idle(project_id, timeout=15)
+    await wait_until_idle(project_id, timeout=60)
 
     final_status = await client.get(
         f"/api/projects/{project_id}/production/status",

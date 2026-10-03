@@ -133,7 +133,7 @@ def _gemini_chat(prompt: str, system: str) -> str:
     return director_chat(prompt, system)
 
 
-DIRECTOR_SYS = """You are a film director for a short AI video.
+DIRECTOR_SYS = """You are a film director for an AI video told beat-by-beat in story order.
 Return ONLY valid JSON:
 {"title": str,
  "scenes": [{"id": "scene-1", "order": 1, "title": str,
@@ -143,9 +143,10 @@ Return ONLY valid JSON:
    "motion": "camera + subject movement",
    "sfx": "comma-separated ambient sounds, no speech",
    "shots": [{"order": 1, "title": str, "description": str, "duration_seconds": 5}]}]}
-Rules: each shot duration_seconds MUST be 1-5 (prefer 5); split longer scenes into multiple shots (15s→3x5);
+Rules: scenes MUST be in chronological story order (beginning → middle → end);
+each shot duration_seconds MUST be 1-5 (prefer 5); split longer scenes into multiple shots (15s→3x5);
 each shot description MUST be a distinct angle/beat (wide / medium / close-up), never identical text;
-enough shots to cover total duration;
+enough scenes AND shots to cover the FULL target duration;
 cinematic PG-13 Hollywood style allowed (intense confrontations, stunts, rain, dramatic lighting);
 no gore/blood/nudity; avoid naming guns/weapons (use tactical gear / opponents);
 never use double quotes inside string values;
@@ -161,14 +162,22 @@ def plan_with_groq(
     language: str,
     genre: str,
     duration_seconds: int,
-    scene_count: int = 3,
+    scene_count: int | None = None,
 ) -> tuple[dict[str, Any], list[SceneState], list[ShotState]]:
-    n = max(2, min(6, scene_count))
+    from app.orchestration.story_flow import recommended_scene_count
+
+    n = (
+        max(2, min(24, int(scene_count)))
+        if scene_count is not None
+        else recommended_scene_count(duration_seconds)
+    )
+    per_scene = max(8, int(round(duration_seconds / n)))
     prompt = (
         f"Project: {project_id}\nGenre: {genre}\n"
         f"TARGET LANGUAGE FOR narration: {language}\n"
         f"Write narration in {language} native script. No English dialogue unless language is English.\n"
-        f"Target total duration about {duration_seconds}s\nScenes: {n}\n"
+        f"Target total duration about {duration_seconds}s (~{per_scene}s per scene)\n"
+        f"Create exactly {n} scenes in story order (scene-1 … scene-{n}).\n"
         f"Story/idea (follow exactly): {story or 'A short cinematic story'}"
     )
     raw = director_chat(prompt, DIRECTOR_SYS)
@@ -186,10 +195,42 @@ def plan_with_groq(
     shots: list[ShotState] = []
     from app.workers.project_context import fallback_spoken_line
 
-    for index, sc in enumerate((data.get("scenes") or [])[:n], start=1):
+    raw_scenes = list(data.get("scenes") or [])[:n]
+    # Pad if the model under-delivers scene count for long runtimes.
+    while len(raw_scenes) < n:
+        idx = len(raw_scenes) + 1
+        raw_scenes.append(
+            {
+                "id": f"scene-{idx}",
+                "order": idx,
+                "title": f"Scene {idx}",
+                "description": f"Continuing story beat {idx}",
+                "duration_seconds": per_scene,
+            }
+        )
+
+    # Distribute total duration across scenes, then split each into ≤5s shots.
+    from app.providers.fal.clip_timing import (
+        clip_seconds_from_settings,
+        plan_shot_durations,
+        shot_beat_description,
+    )
+
+    try:
+        from app.core.config import get_settings
+
+        max_shot = clip_seconds_from_settings(get_settings())
+    except Exception:
+        max_shot = 5
+
+    # Even split of total runtime across story beats.
+    base = max(5, duration_seconds // n)
+    rem = duration_seconds - base * n
+    scene_durs = [base + (1 if i < rem else 0) for i in range(n)]
+
+    for index, sc in enumerate(raw_scenes, start=1):
         sid = str(sc.get("id") or f"scene-{index}")
-        dur = float(sc.get("duration_seconds") or max(8, duration_seconds // n))
-        dur = max(6.0, min(24.0, dur))
+        dur = float(scene_durs[index - 1])
         desc = str(sc.get("description") or sc.get("action") or "").strip()
         narration = str(sc.get("narration") or "").strip()
         motion = str(sc.get("motion") or "").strip()
@@ -207,7 +248,7 @@ def plan_with_groq(
                 "order": int(sc.get("order") or index),
                 "title": scene_title,
                 "description": desc or f"Scene {index}",
-                "duration_seconds": dur,
+                "duration_seconds": int(round(dur)),
                 "status": "pending",
                 "narration": narration,
                 "voice_over": [
@@ -220,18 +261,6 @@ def plan_with_groq(
                 ],
             }
         )
-        from app.providers.fal.clip_timing import (
-            clip_seconds_from_settings,
-            plan_shot_durations,
-            shot_beat_description,
-        )
-
-        try:
-            from app.core.config import get_settings
-
-            max_shot = clip_seconds_from_settings(get_settings())
-        except Exception:
-            max_shot = 5
         durs = plan_shot_durations(int(round(dur)), max_clip=max_shot)
         shot_specs = sc.get("shots") or []
         for s_index, shot_dur in enumerate(durs, start=1):
@@ -254,6 +283,7 @@ def plan_with_groq(
                     "description": raw_desc,
                     "status": "pending",
                     "duration_seconds": float(shot_dur),
+                    "camera": str(sh.get("camera") or motion or "").strip(),
                 }
             )
     if not scenes:
@@ -269,7 +299,7 @@ def plan_with_gemini(
     language: str,
     genre: str,
     duration_seconds: int,
-    scene_count: int = 3,
+    scene_count: int | None = None,
 ) -> tuple[dict[str, Any], list[SceneState], list[ShotState]]:
     return plan_with_groq(
         project_id=project_id,

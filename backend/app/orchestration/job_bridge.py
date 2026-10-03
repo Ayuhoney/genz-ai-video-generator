@@ -63,16 +63,22 @@ def reconcile_pending_jobs(state: WorkflowState, *, step: str) -> WorkflowState:
     retry_counts = dict(state.get("retry_counts") or {})
     errors = list(state.get("errors") or [])
     max_retries = int(state.get("max_retries") or 2)
+    image_ready = set(state.get("image_ready_shot_ids") or [])
 
     for job in succeeded:
         shot_id = job.get("shot_id")
         scene_id = job.get("scene_id")
-        if shot_id:
+        job_type = str(job.get("type") or "")
+        # Per-shot stills mark image-ready only — video clips complete the shot.
+        if shot_id and job_type == "image":
+            image_ready.add(str(shot_id))
+        if shot_id and job_type == "video":
             shot_status[shot_id] = "completed"
+            image_ready.add(str(shot_id))
             for shot in shots:
                 if shot["id"] == shot_id:
                     shot["status"] = "completed"
-        if scene_id and job.get("type") in {"scene_render", "image", "tts", "sfx", "music"}:
+        if scene_id and job_type in {"scene_render", "tts", "sfx", "music"}:
             related_shots = [s for s in shots if s["scene_id"] == scene_id]
             if related_shots and all(
                 shot_status.get(s["id"]) == "completed" for s in related_shots
@@ -99,21 +105,25 @@ def reconcile_pending_jobs(state: WorkflowState, *, step: str) -> WorkflowState:
                 if scene["status"] != "failed":
                     scene["status"] = "completed"
                     scene_status[scene["id"]] = "completed"
-        return {
+        payload: dict[str, Any] = {
             "scenes": scenes,  # type: ignore[typeddict-item]
             "shots": shots,  # type: ignore[typeddict-item]
             "scene_status": scene_status,
             "shot_status": shot_status,
             "retry_counts": retry_counts,
             "errors": errors,
+            "image_ready_shot_ids": sorted(image_ready),
             "pending_job_ids": [],
             "awaiting_jobs": False,
             "status": "running",
             "pause_reason": "",
             "current_step": step,  # type: ignore[typeddict-item]
-            "regenerate_scene_ids": [],
-            "regenerate_shot_ids": [],
         }
+        # Keep regen targets through the story loop; clear only after audio/assembly.
+        if step in {"audio_planning", "assembly_planning"}:
+            payload["regenerate_scene_ids"] = []
+            payload["regenerate_shot_ids"] = []
+        return payload  # type: ignore[return-value]
 
     # Handle failures — pause for resume/retry without wiping completed work.
     failed_scene: str | None = None
@@ -157,6 +167,7 @@ def reconcile_pending_jobs(state: WorkflowState, *, step: str) -> WorkflowState:
         "shot_status": shot_status,
         "retry_counts": retry_counts,
         "errors": errors,
+        "image_ready_shot_ids": sorted(image_ready),
         "pending_job_ids": job_ids,
         "awaiting_jobs": False,
         "status": status,  # type: ignore[typeddict-item]

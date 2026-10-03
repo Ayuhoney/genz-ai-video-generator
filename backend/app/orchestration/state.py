@@ -61,6 +61,7 @@ class ShotState(TypedDict):
     description: str
     status: ItemStatus
     duration_seconds: NotRequired[float]
+    camera: NotRequired[str]
 
 
 class WorkflowError(TypedDict):
@@ -86,6 +87,14 @@ class WorkflowState(TypedDict, total=False):
     # Partial regeneration targets.
     regenerate_scene_ids: list[str]
     regenerate_shot_ids: list[str]
+    # shot_id → Wan motion prompt override (user guided / AI auto-fix).
+    video_prompt_overrides: NotRequired[dict[str, str]]
+    # auto | ultra | guided — default motion rewrite mode for regen clips.
+    video_motion_mode: NotRequired[str]
+    # Story-order capture: which scene beat is active (stills → clips).
+    active_scene_id: NotRequired[str]
+    # Shots whose Flux stills finished successfully (video not necessarily done).
+    image_ready_shot_ids: NotRequired[list[str]]
     director_plan: dict[str, Any]
     pause_reason: str
     pending_job_ids: list[str]
@@ -110,6 +119,10 @@ def empty_workflow_state(project_id: str, *, max_retries: int = 2) -> WorkflowSt
         "fail_shot_ids": [],
         "regenerate_scene_ids": [],
         "regenerate_shot_ids": [],
+        "video_prompt_overrides": {},
+        "video_motion_mode": "auto",
+        "active_scene_id": "",
+        "image_ready_shot_ids": [],
         "director_plan": {},
         "pause_reason": "",
         "pending_job_ids": [],

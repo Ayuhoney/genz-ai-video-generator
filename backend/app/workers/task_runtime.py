@@ -144,8 +144,27 @@ def run_mock_job(
         notify_api_job_complete(job_id)
         raise
     except ProviderError as exc:
+        # Chain failures often wrap CONTENT_REJECTED — surface a clear status for the UI.
+        joined = " ".join(str(x) for x in (exc.errors or [])) + " " + str(exc)
+        content_blocked = (
+            getattr(exc, "error_class", None) == FalErrorClass.CONTENT_REJECTED
+            or getattr(exc, "error_class", None) == FalErrorClass.CONTENT_REJECTED.value
+            or is_content_blocked_error(exc)
+            or "content_policy" in joined.lower()
+            or "content checker" in joined.lower()
+            or "CONTENT_REJECTED" in joined
+        )
+        safe = (
+            client_facing_message(FalErrorClass.CONTENT_REJECTED)
+            if content_blocked
+            else str(exc)
+        )
         job_store.mark_job_failed(
-            db, job_id, str(exc), **_failure_fields(exc)
+            db,
+            job_id,
+            safe,
+            status="needs_new_prompt" if content_blocked else None,
+            **_failure_fields(exc),
         )
         notify_api_job_complete(job_id)
         raise

@@ -6,6 +6,7 @@ from app.orchestration.state import WorkflowState
 
 Route = Literal[
     "continue",
+    "next_scene",
     "pause_gate",
     "retry_asset",
     "retry_video",
@@ -29,7 +30,17 @@ def after_asset_planning(state: WorkflowState) -> Route:
 
 
 def after_video_planning(state: WorkflowState) -> Route:
-    return _after_exec_step(state)
+    status = state.get("status")
+    if status == "failed":
+        return "end_failed"
+    if status == "paused":
+        return "pause_gate"
+    # Story loop: more beats → back to Flux stills for the next scene.
+    from app.orchestration.story_flow import story_beats_remaining
+
+    if story_beats_remaining(state):
+        return "next_scene"
+    return "continue"
 
 
 def after_audio_planning(state: WorkflowState) -> Route:

@@ -122,7 +122,11 @@ export async function getAssetSignedUrl(
 
 export async function regenerateProduction(
   projectId: string,
-  payload: { sceneIds?: string[]; shotIds?: string[] },
+  payload: {
+    sceneIds?: string[]
+    shotIds?: string[]
+    includeStills?: boolean
+  },
 ): Promise<{
   projectId: string
   status: string
@@ -135,6 +139,59 @@ export async function regenerateProduction(
     body: JSON.stringify({
       sceneIds: payload.sceneIds ?? [],
       shotIds: payload.shotIds ?? [],
+      includeStills: payload.includeStills ?? false,
+    }),
+  })
+}
+
+export async function fixShotProduction(
+  projectId: string,
+  payload: {
+    shotId: string
+    mode: import('../types').FixShotMode
+    guidance?: string
+  },
+): Promise<{
+  projectId: string
+  status: string
+  message: string
+  mode: string
+  shotIds: string[]
+  motionPrompt?: string | null
+}> {
+  return apiRequest(`/api/projects/${projectId}/production/fix-shot`, {
+    method: 'POST',
+    body: JSON.stringify({
+      shotId: payload.shotId,
+      mode: payload.mode,
+      guidance: payload.guidance,
+    }),
+  })
+}
+
+/** Continue from stuck/missing work; keeps completed assets. */
+export async function resumeMissingProduction(
+  projectId: string,
+  payload?: {
+    force?: string[]
+    confirm?: boolean
+    assemble?: boolean
+  },
+): Promise<{
+  projectId: string
+  status: string
+  message: string
+  estimatedCostUsd?: number
+  jobIds: string[]
+  assembled?: boolean
+  reclaimedJobIds?: string[]
+}> {
+  return apiRequest(`/api/projects/${projectId}/production/resume-missing`, {
+    method: 'POST',
+    body: JSON.stringify({
+      force: payload?.force ?? [],
+      confirm: payload?.confirm ?? true,
+      assemble: payload?.assemble ?? true,
     }),
   })
 }
@@ -254,6 +311,8 @@ export interface ProductionStatusResponse {
   shotStatus: Record<string, string>
   retryCounts: Record<string, number>
   errors: unknown[]
+  issues?: import('../types').ProductionIssue[]
+  activeSceneId?: string | null
   running?: boolean
   interrupted?: boolean
 }

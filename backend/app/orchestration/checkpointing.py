@@ -59,6 +59,8 @@ def close_checkpointer() -> None:
 
 
 def thread_config(project_id: str, **extra: Any) -> dict[str, Any]:
+    """LangGraph config: thread id + high recursion for scene-by-scene loops."""
     configurable: dict[str, Any] = {"thread_id": project_id}
     configurable.update(extra)
-    return {"configurable": configurable}
+    # Each story beat ≈ asset + video (+ pause resumes). 24 scenes need headroom.
+    return {"configurable": configurable, "recursion_limit": 250}

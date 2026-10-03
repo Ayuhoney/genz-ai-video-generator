@@ -89,13 +89,23 @@ def dispatch_jobs(jobs: list[dict[str, Any]]) -> list[str]:
     return [j["id"] for j in jobs]
 
 
+def _shot_image_prompt(shot: dict[str, Any]) -> str:
+    """Build still prompt from shot title + description + camera."""
+    title = str(shot.get("title") or "").strip()
+    description = str(shot.get("description") or "").strip()
+    camera = str(shot.get("camera") or "").strip()
+    parts = [p for p in (title, description, camera) if p]
+    return ". ".join(parts).strip()
+
+
 def dispatch_image_jobs(
     project_id: str,
-    scene_ids: list[str],
+    shots: list[dict[str, Any]],
     *,
     regen_token: str | None = None,
 ) -> list[str]:
-    # Clear prior face lock so later scenes wait for the new starting-scene still.
+    """One image job per planned shot (not per scene)."""
+    # Clear prior face lock; character refs (not scene-1 composition) drive consistency.
     try:
         from app.workers.project_context import clear_locked_look, first_scene_id
 
@@ -104,32 +114,45 @@ def dispatch_image_jobs(
     except Exception:
         pass
 
+    from app.workers.produce import estimate_images_cost_usd
+
     force_payload = (
         {"regen_token": regen_token, "force": True} if regen_token else {}
     )
-    # Prefer starting scene first so look-lock is available sooner.
+    # Prefer starting-scene shots first so character look-lock is available sooner.
     try:
         from app.workers.project_context import first_scene_id
 
         anchor = first_scene_id(project_id)
     except Exception:
         anchor = None
-    ordered = list(scene_ids)
-    if anchor and anchor in ordered:
-        ordered = [anchor] + [s for s in ordered if s != anchor]
+    ordered = list(shots)
+    if anchor:
+        ordered = [s for s in ordered if s.get("scene_id") == anchor] + [
+            s for s in ordered if s.get("scene_id") != anchor
+        ]
 
+    per_image = estimate_images_cost_usd(1)
     jobs = [
         create_job(
             project_id=project_id,
             task_type="image",
-            scene_id=scene_id,
+            scene_id=str(shot.get("scene_id") or ""),
+            shot_id=str(shot["id"]),
             input_payload={
-                "scene_id": scene_id,
+                "scene_id": str(shot.get("scene_id") or ""),
+                "shot_id": str(shot["id"]),
                 "kind": "storyboard",
+                "prompt": _shot_image_prompt(shot),
+                "title": str(shot.get("title") or ""),
+                "description": str(shot.get("description") or ""),
+                "camera": str(shot.get("camera") or ""),
+                "estimated_cost_usd": per_image,
                 **force_payload,
             },
         )
-        for scene_id in ordered
+        for shot in ordered
+        if shot.get("id")
     ]
     return dispatch_jobs(jobs)
 
@@ -140,28 +163,40 @@ def dispatch_shot_video_jobs(
     *,
     fail_shot_ids: set[str] | None = None,
     regen_token: str | None = None,
+    prompt_overrides: dict[str, str] | None = None,
+    motion_mode: str = "auto",
 ) -> list[str]:
     """Parallel shot video jobs only (scene composition runs at assembly)."""
     fail_shot_ids = fail_shot_ids or set()
+    overrides = prompt_overrides or {}
     force = {"regen_token": regen_token, "force": True} if regen_token else {}
-    shot_jobs = [
-        create_job(
-            project_id=project_id,
-            task_type="video",
-            scene_id=shot["scene_id"],
-            shot_id=shot["id"],
-            input_payload={
-                "shot_id": shot["id"],
-                "scene_id": shot["scene_id"],
-                "attempt": shot.get("_attempt", 0),
-                "duration_seconds": float(shot.get("duration_seconds") or 5),
-                "prompt": str(shot.get("description") or shot.get("title") or shot["id"]),
-                **force,
-            },
-            simulate_failure=shot["id"] in fail_shot_ids,
+    shot_jobs = []
+    for shot in shots:
+        sid = str(shot["id"])
+        payload: dict[str, Any] = {
+            "shot_id": sid,
+            "scene_id": shot["scene_id"],
+            "attempt": shot.get("_attempt", 0),
+            "duration_seconds": float(shot.get("duration_seconds") or 5),
+            # Story text is kept for logs/debug; produce.py converts to motion-only.
+            "prompt": str(shot.get("description") or shot.get("title") or sid),
+            "camera": str(shot.get("camera") or ""),
+            "motion_mode": str(shot.get("_motion_mode") or motion_mode or "auto"),
+            **force,
+        }
+        if sid in overrides and overrides[sid].strip():
+            payload["motion_prompt"] = overrides[sid].strip()
+            payload["motion_mode"] = "guided"
+        shot_jobs.append(
+            create_job(
+                project_id=project_id,
+                task_type="video",
+                scene_id=shot["scene_id"],
+                shot_id=sid,
+                input_payload=payload,
+                simulate_failure=sid in fail_shot_ids,
+            )
         )
-        for shot in shots
-    ]
     return dispatch_jobs(shot_jobs)
 
 
@@ -173,24 +208,73 @@ def dispatch_audio_jobs(
     genre: str | None = None,
     regen_token: str | None = None,
 ) -> list[str]:
-    """Per-scene TTS, SFX, and background music."""
-    from app.workers.project_context import get_project_doc, spoken_text_for_scene
+    """Per-line TTS, per-scene SFX, and ONE project-level music theme."""
+    from app.media.audio_timeline import (
+        assign_lines_to_shots,
+        build_character_voice_map,
+        dialogue_lines_from_scene,
+        resolve_character_voice,
+    )
+    from app.workers.project_context import (
+        get_project_doc,
+        list_characters,
+        spoken_text_for_scene,
+    )
 
     project = get_project_doc(project_id) or {}
     lang = (language or str(project.get("language") or "Hindi")).strip() or "Hindi"
     force = {"regen_token": regen_token, "force": True} if regen_token else {}
+    voice_map = build_character_voice_map(list_characters(project_id))
     jobs: list[dict[str, Any]] = []
+    total_duration = 0.0
+
     for scene in scenes:
         scene_id = scene["id"] if isinstance(scene, dict) else str(scene)
         title = str(scene.get("title") or scene_id) if isinstance(scene, dict) else scene_id
-        description = str(scene.get("description") or "") if isinstance(scene, dict) else ""
-        duration = float(scene.get("duration_seconds") or 10) if isinstance(scene, dict) else 10.0
-        # Spoken lines in selected language — never the English visual description.
-        narration = spoken_text_for_scene(
-            project_id,
-            scene_id,
-            scene=scene if isinstance(scene, dict) else None,
-            language=lang,
+        description = (
+            str(scene.get("description") or "") if isinstance(scene, dict) else ""
+        )
+        duration = (
+            float(scene.get("duration_seconds") or 10)
+            if isinstance(scene, dict)
+            else 10.0
+        )
+        total_duration += duration
+        scene_dict = scene if isinstance(scene, dict) else {"id": scene_id}
+        lines = dialogue_lines_from_scene(scene_dict)
+        if not lines:
+            # Fallback: one narrator line from joined spoken text.
+            narration = spoken_text_for_scene(
+                project_id,
+                scene_id,
+                scene=scene_dict,
+                language=lang,
+            )
+            if narration:
+                lines = [
+                    {
+                        "id": f"{scene_id}-line-1",
+                        "index": 0,
+                        "text": narration,
+                        "character_id": None,
+                        "character_name": "Narrator",
+                        "shot_id": None,
+                        "estimated_seconds": min(8.0, duration),
+                    }
+                ]
+        shot_ids = [
+            str(sh.get("id"))
+            for sh in (scene_dict.get("shots") or [])
+            if isinstance(sh, dict) and sh.get("id")
+        ]
+        line_shot_map = assign_lines_to_shots(
+            [str(ln["id"]) for ln in lines],
+            shot_ids,
+            explicit={
+                str(ln["id"]): str(ln.get("shot_id") or "")
+                for ln in lines
+                if ln.get("shot_id")
+            },
         )
         base = {
             "scene_id": scene_id,
@@ -199,17 +283,36 @@ def dispatch_audio_jobs(
             "duration_seconds": duration,
             "language": lang,
             "genre": genre,
-            "script": narration,
             **force,
         }
-        jobs.append(
-            create_job(
-                project_id=project_id,
-                task_type="tts",
-                scene_id=scene_id,
-                input_payload={**base, "text": narration},
+        for line in lines:
+            line_id = str(line["id"])
+            voice = resolve_character_voice(
+                voice_map,
+                character_id=line.get("character_id"),
+                character_name=line.get("character_name"),
             )
-        )
+            linked_shot = line_shot_map.get(line_id) or None
+            jobs.append(
+                create_job(
+                    project_id=project_id,
+                    task_type="tts",
+                    scene_id=scene_id,
+                    shot_id=line_id,
+                    input_payload={
+                        **base,
+                        "text": str(line["text"]),
+                        "script": str(line["text"]),
+                        "line_id": line_id,
+                        "line_index": int(line.get("index") or 0),
+                        "character_id": line.get("character_id"),
+                        "character_name": line.get("character_name") or "Narrator",
+                        "voice": voice,
+                        # Visual shot this line plays over (job.shot_id stays line_id).
+                        "linked_shot_id": linked_shot,
+                    },
+                )
+            )
         jobs.append(
             create_job(
                 project_id=project_id,
@@ -218,14 +321,30 @@ def dispatch_audio_jobs(
                 input_payload=base,
             )
         )
-        jobs.append(
-            create_job(
-                project_id=project_id,
-                task_type="music",
-                scene_id=scene_id,
-                input_payload=base,
-            )
+
+    # ONE theme track for the whole project (scenes only trim + volume later).
+    theme_seconds = max(10.0, total_duration or 30.0)
+    jobs.append(
+        create_job(
+            project_id=project_id,
+            task_type="music",
+            scene_id=None,
+            input_payload={
+                "kind": "theme",
+                "scene_title": str(project.get("title") or "Theme"),
+                "scene_description": str(
+                    project.get("concept")
+                    or project.get("genre")
+                    or genre
+                    or "cinematic"
+                ),
+                "duration_seconds": theme_seconds,
+                "language": lang,
+                "genre": genre or project.get("genre"),
+                **force,
+            },
         )
+    )
     return dispatch_jobs(jobs)
 
 

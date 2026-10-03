@@ -47,6 +47,8 @@ def build_graph() -> StateGraph:
         after_video_planning,
         {
             "continue": "audio_planning",
+            # Capture the next story beat (stills → clips) before audio.
+            "next_scene": "asset_planning",
             "pause_gate": "pause_gate",
             "end_failed": END,
         },

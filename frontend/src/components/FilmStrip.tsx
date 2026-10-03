@@ -1,8 +1,9 @@
-import { RefreshCw, X } from 'lucide-react'
+import { ImagePlus, RefreshCw, Sparkles, X } from 'lucide-react'
 import { useEffect, useId, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from './Button'
 import { StatusBadge } from './StatusBadge'
+import type { ProductionIssueCode } from '../types'
 
 export type FilmFrameKind = 'image' | 'video'
 
@@ -17,6 +18,9 @@ export interface FilmFrame {
   shotId?: string | null
   retryKind?: 'scene' | 'shot'
   retryId?: string
+  /** When set, show a clearer CTA than plain "Retry". */
+  issueCode?: ProductionIssueCode
+  issueMessage?: string
 }
 
 interface FilmStripProps {
@@ -24,6 +28,8 @@ interface FilmStripProps {
   loading?: boolean
   retryingKey?: string | null
   onRetry?: (kind: 'scene' | 'shot', id: string) => void
+  onRegenerateStill?: (shotId: string) => void
+  onAutoFix?: (shotId: string) => void
 }
 
 export function FilmStrip({
@@ -31,6 +37,8 @@ export function FilmStrip({
   loading = false,
   retryingKey = null,
   onRetry,
+  onRegenerateStill,
+  onAutoFix,
 }: FilmStripProps) {
   const [active, setActive] = useState<FilmFrame | null>(null)
 
@@ -97,9 +105,57 @@ export function FilmStrip({
                   {frame.status ? (
                     <StatusBadge status={frame.status} />
                   ) : null}
+                  {frame.issueMessage && frame.status === 'failed' ? (
+                    <p className="line-clamp-3 text-[10px] leading-snug text-amber-800 dark:text-amber-200">
+                      {frame.issueMessage}
+                    </p>
+                  ) : null}
                 </div>
               </button>
-              {frame.retryKind && frame.retryId && onRetry ? (
+              {frame.status === 'failed' &&
+              frame.shotId &&
+              frame.kind === 'video' &&
+              (frame.issueCode === 'content_policy' ||
+                frame.issueCode === 'needs_new_image') ? (
+                <div className="mt-2 flex w-full flex-col gap-1.5">
+                  {onAutoFix ? (
+                    <Button
+                      size="sm"
+                      className="w-full"
+                      loading={retryingKey === `shot:${frame.shotId}`}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onAutoFix(frame.shotId!)
+                      }}
+                    >
+                      <Sparkles className="h-3.5 w-3.5" />
+                      AI auto-fix
+                    </Button>
+                  ) : null}
+                  {onRegenerateStill ? (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="w-full"
+                      loading={retryingKey === `shot:${frame.shotId}`}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onRegenerateStill(frame.shotId!)
+                      }}
+                    >
+                      <ImagePlus className="h-3.5 w-3.5" />
+                      New still + clip
+                    </Button>
+                  ) : null}
+                </div>
+              ) : frame.retryKind &&
+                frame.retryId &&
+                onRetry &&
+                !(
+                  frame.kind === 'image' &&
+                  (frame.issueCode === 'content_policy' ||
+                    frame.issueCode === 'needs_new_image')
+                ) ? (
                 <Button
                   size="sm"
                   variant="secondary"
@@ -111,7 +167,11 @@ export function FilmStrip({
                   }}
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
-                  Retry
+                  {frame.status === 'failed'
+                    ? frame.kind === 'video'
+                      ? 'Retry clip'
+                      : 'Retry still'
+                    : 'Retry'}
                 </Button>
               ) : null}
             </li>

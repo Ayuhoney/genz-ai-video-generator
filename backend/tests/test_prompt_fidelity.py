@@ -1,8 +1,13 @@
-"""Prompt softening keeps scene text; only strips blocked words."""
+"""Image prompts keep scene text; Wan video prompts are motion-only."""
 
 from __future__ import annotations
 
-from app.providers.fal.clip_timing import motion_only_prompt, soft_visual_prompt
+from app.providers.fal.clip_timing import (
+    DEFAULT_SAFE_MOTION_PROMPT,
+    motion_only_prompt,
+    soft_visual_prompt,
+    ultra_safe_motion_prompt,
+)
 
 
 ACTION_IDEA = (
@@ -41,29 +46,40 @@ def test_soft_visual_idempotent() -> None:
     assert once.lower().count("cinematic film still") == 1
 
 
-def test_motion_prompt_keeps_scene_text() -> None:
+def test_motion_prompt_drops_story_and_weapons() -> None:
     out = motion_only_prompt(ACTION_IDEA).lower()
-    assert "warehouse" in out
-    assert "fight" in out
-    assert "journalist" in out
-    assert "cinematic camera motion" in out
-    assert "peaceful everyday scene" not in out
-    assert "blood" not in out
-    assert "gore" not in out
+    assert "warehouse" not in out
+    assert "fight" not in out
+    assert "journalist" not in out
+    assert "sword" not in out
+    assert "cinematic slow motion" in out
+    assert "camera pans" in out
 
 
-def test_motion_prompt_gentle_for_non_action() -> None:
-    out = motion_only_prompt("a quiet chai stall at dusk in mumbai").lower()
-    assert "chai" in out
-    assert "mumbai" in out
+def test_motion_prompt_keeps_camera_cues() -> None:
+    out = motion_only_prompt(
+        "quiet moment",
+        camera="slow push-in, soft golden hour light",
+    ).lower()
+    assert "push" in out
+    assert "cinematic slow motion" in out
+    assert "fight" not in out
+
+
+def test_motion_prompt_gentle_for_short_camera_note() -> None:
+    out = motion_only_prompt("slow pan left, dust in air").lower()
+    assert "pan" in out
+    assert "cinematic slow motion" in out
+
+
+def test_ultra_safe_ignores_story() -> None:
+    out = ultra_safe_motion_prompt(ACTION_IDEA)
+    assert out == DEFAULT_SAFE_MOTION_PROMPT
+    assert "warehouse" not in out.lower()
 
 
 def test_motion_prompt_idempotent() -> None:
-    scene = (
-        "Wide shot of throne room, king on throne, Rama kneeling, "
-        "crowd cheering, Kaikeyi in shadows"
-    )
-    once = motion_only_prompt(scene)
+    once = motion_only_prompt("slow dolly forward")
     twice = motion_only_prompt(once)
     assert once == twice
-    assert "throne" in once.lower()
+    assert "cinematic slow motion" in once.lower()

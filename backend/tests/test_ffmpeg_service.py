@@ -107,12 +107,33 @@ def test_assemble_and_validate_final(tmp_path: Path) -> None:
     scenes: list[Path] = []
     for index in range(2):
         path = tmp_path / f"scene_{index}.mp4"
-        write_tiny_video_mp4(path, duration=0.35)
+        write_tiny_video_mp4(path, duration=0.5)
         scenes.append(path)
 
     final = tmp_path / "final.mp4"
-    total = assemble_final_video(scene_videos=scenes, output_path=final)
+    total = assemble_final_video(
+        scene_videos=scenes,
+        output_path=final,
+        audio_crossfade_seconds=0.4,
+    )
     validate_final_output(final, expected_duration=total, tolerance_seconds=1.5)
+
+
+def test_render_scene_mix_filter_has_loudnorm_and_duck() -> None:
+    from app.media.ffmpeg_service import build_scene_mix_filter
+
+    fc = build_scene_mix_filter(
+        voice_count=1,
+        has_sfx=True,
+        has_music=True,
+        mix_duration=5.0,
+        sfx_volume=0.22,
+        music_volume=0.30,
+        loudnorm_i=-16.0,
+    )
+    assert "sidechaincompress" in fc
+    assert "loudnorm=I=-16.0" in fc
+    assert "volume=0.220" in fc
 
 
 def test_validate_rejects_missing_audio(tmp_path: Path) -> None:

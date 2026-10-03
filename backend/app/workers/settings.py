@@ -99,6 +99,10 @@ class WorkerSettings(BaseSettings):
         default=600.0,
         alias="FAL_POLL_TIMEOUT_SECONDS",
     )
+    fal_audio_poll_timeout_seconds: float = Field(
+        default=180.0,
+        alias="FAL_AUDIO_POLL_TIMEOUT_SECONDS",
+    )
     fal_image_cost_usd: float = Field(default=0.01, alias="FAL_IMAGE_COST_USD")
     fal_image_cost_per_second: float = Field(
         default=0.0,
@@ -152,6 +156,18 @@ class WorkerSettings(BaseSettings):
         default=2.0,
         alias="FFMPEG_DURATION_TOLERANCE_SECONDS",
     )
+    audio_line_gap_seconds: float = Field(
+        default=0.3,
+        alias="AUDIO_LINE_GAP_SECONDS",
+    )
+    audio_scene_crossfade_seconds: float = Field(
+        default=0.4,
+        alias="AUDIO_SCENE_CROSSFADE_SECONDS",
+    )
+    audio_music_volume: float = Field(default=0.30, alias="AUDIO_MUSIC_VOLUME")
+    audio_sfx_volume: float = Field(default=0.22, alias="AUDIO_SFX_VOLUME")
+    audio_voice_volume: float = Field(default=1.0, alias="AUDIO_VOICE_VOLUME")
+    audio_loudnorm_i: float = Field(default=-16.0, alias="AUDIO_LOUDNORM_I")
 
 
 @lru_cache

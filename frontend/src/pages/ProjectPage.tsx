@@ -1,23 +1,31 @@
 import { ArrowLeft, RefreshCw } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Button } from '../components/Button'
 import { FilmStrip, type FilmFrame } from '../components/FilmStrip'
+import { ProductionIssuesBanner } from '../components/ProductionIssuesBanner'
 import { ProgressBar, StatusBadge } from '../components/StatusBadge'
 import { EmptyState, ErrorState, Skeleton, Spinner } from '../components/States'
 import { useAsync } from '../hooks/useAsync'
 import {
+  fixShotProduction,
   getAssetSignedUrl,
   getFinalVideoUrl,
   getProductionState,
   getProject,
   listProjectAssets,
   regenerateProduction,
+  resumeMissingProduction,
   retryFailedItem,
   type ProjectAsset,
 } from '../services/api'
 import { formatDate, formatDuration } from '../services/utils'
-import type { ProductionStage, Scene } from '../types'
+import type {
+  FixShotMode,
+  ProductionIssue,
+  ProductionStage,
+  Scene,
+} from '../types'
 
 const POLL_MS = 2500
 
@@ -52,6 +60,7 @@ export function ProjectPage() {
   const [finalVideoUrl, setFinalVideoUrl] = useState<string | null>(null)
   const [frames, setFrames] = useState<FilmFrame[]>([])
   const [framesLoading, setFramesLoading] = useState(false)
+  const [issues, setIssues] = useState<ProductionIssue[]>([])
 
   const loadFilmstrip = useCallback(async () => {
     if (!projectId) {
@@ -74,12 +83,18 @@ export function ProjectPage() {
 
       const sceneById = new Map(state.scenes.map((s) => [s.id, s] as const))
       const shotById = new Map(nextShots.map((s) => [s.id, s] as const))
+      const issueByShot = new Map(
+        (state.raw.issues || [])
+          .filter((issue) => issue.shotId)
+          .map((issue) => [String(issue.shotId), issue] as const),
+      )
+      setIssues(state.raw.issues || [])
 
-      const latestImageByScene = new Map<string, ProjectAsset>()
+      const latestImageByShot = new Map<string, ProjectAsset>()
       const latestVideoByShot = new Map<string, ProjectAsset>()
       for (const asset of assets) {
-        if (asset.type === 'image' && asset.sceneId) {
-          latestImageByScene.set(asset.sceneId, asset)
+        if (asset.type === 'image' && asset.shotId) {
+          latestImageByShot.set(asset.shotId, asset)
         }
         if (asset.type === 'video' && asset.shotId) {
           latestVideoByShot.set(asset.shotId, asset)
@@ -105,49 +120,49 @@ export function ProjectPage() {
       const orderedScenes = [...state.scenes].sort((a, b) => a.order - b.order)
 
       for (const scene of orderedScenes) {
-        const image = latestImageByScene.get(scene.id)
-        if (image) {
-          nextFrames.push({
-            id: `image:${image.id}`,
-            kind: 'image',
-            label: scene.title,
-            sublabel: `Scene ${scene.order} · Still`,
-            url: await resolveUrl(image.id),
-            status: mapUiStatus(scene.status),
-            sceneId: scene.id,
-            retryKind: 'scene',
-            retryId: scene.id,
-          })
-        } else {
-          nextFrames.push({
-            id: `image-placeholder:${scene.id}`,
-            kind: 'image',
-            label: scene.title,
-            sublabel: `Scene ${scene.order} · Still pending`,
-            url: null,
-            status: mapUiStatus(scene.status),
-            sceneId: scene.id,
-            retryKind: 'scene',
-            retryId: scene.id,
-          })
-        }
-
         const sceneShots = nextShots
           .filter((s) => s.sceneId === scene.id)
           .sort((a, b) => a.order - b.order)
         for (const shot of sceneShots) {
+          const issue = issueByShot.get(shot.id)
+          const image = latestImageByShot.get(shot.id)
           const video = latestVideoByShot.get(shot.id)
+          const imageStatus = mapUiStatus(
+            image ? 'completed' : issue ? 'failed' : shot.status,
+          )
+          const videoStatus = mapUiStatus(
+            video ? 'completed' : issue ? 'failed' : shot.status,
+          )
+          nextFrames.push({
+            id: image ? `image:${image.id}` : `image-placeholder:${shot.id}`,
+            kind: 'image',
+            label: shot.title || `Shot ${shot.order}`,
+            sublabel: `${sceneById.get(scene.id)?.title || scene.title} · Still`,
+            url: image ? await resolveUrl(image.id) : null,
+            status: imageStatus,
+            sceneId: scene.id,
+            shotId: shot.id,
+            retryKind: 'shot',
+            retryId: shot.id,
+            issueCode: image ? undefined : issue?.code,
+            issueMessage:
+              !image && issue && issue.code === 'needs_new_image'
+                ? issue.message
+                : undefined,
+          })
           nextFrames.push({
             id: video ? `video:${video.id}` : `video-placeholder:${shot.id}`,
             kind: 'video',
             label: shot.title || `Shot ${shot.order}`,
             sublabel: `${sceneById.get(scene.id)?.title || scene.title} · Clip`,
             url: video ? await resolveUrl(video.id) : null,
-            status: mapUiStatus(shot.status),
+            status: videoStatus,
             sceneId: scene.id,
             shotId: shot.id,
             retryKind: 'shot',
             retryId: shot.id,
+            issueCode: video ? undefined : issue?.code,
+            issueMessage: video ? undefined : issue?.message,
           })
         }
 
@@ -202,6 +217,7 @@ export function ProjectPage() {
     setStages(productionAsync.data.stages)
     setScenes(productionAsync.data.scenes)
     setWorkflowStatus(productionAsync.data.raw.status)
+    setIssues(productionAsync.data.raw.issues || [])
     setShots(
       (productionAsync.data.raw.shots || []).map((s) => ({
         id: s.id,
@@ -237,6 +253,7 @@ export function ProjectPage() {
           setStages(data.stages)
           setScenes(data.scenes)
           setWorkflowStatus(data.raw.status)
+          setIssues(data.raw.issues || [])
           setShots(
             (data.raw.shots || []).map((s) => ({
               id: s.id,
@@ -291,6 +308,67 @@ export function ProjectPage() {
       setRetryingKey(null)
     }
   }
+
+  const onFixShot = async (
+    shotId: string,
+    mode: FixShotMode,
+    guidance?: string,
+  ) => {
+    setRetryingKey(`shot:${shotId}`)
+    setRetryError(null)
+    try {
+      await fixShotProduction(projectId, { shotId, mode, guidance })
+      setWorkflowStatus('running')
+      await productionAsync.reload()
+      void loadFilmstrip()
+    } catch (error) {
+      setRetryError(
+        error instanceof Error ? error.message : 'Fix failed.',
+      )
+    } finally {
+      setRetryingKey(null)
+    }
+  }
+
+  const onRegenerateStill = async (shotId: string) => {
+    await onFixShot(shotId, 'new_still')
+  }
+
+  const onResumeStuck = async () => {
+    setRetryingKey('resume:stuck')
+    setRetryError(null)
+    try {
+      await resumeMissingProduction(projectId, { confirm: true, assemble: true })
+      setWorkflowStatus('running')
+      await productionAsync.reload()
+      void loadFilmstrip()
+    } catch (error) {
+      setRetryError(
+        error instanceof Error
+          ? error.message
+          : 'Could not resume stuck production.',
+      )
+    } finally {
+      setRetryingKey(null)
+    }
+  }
+
+  const issueShotIds = useMemo(
+    () => new Set(issues.map((i) => i.shotId).filter(Boolean) as string[]),
+    [issues],
+  )
+
+  const shotLabels = useMemo(() => {
+    const sceneTitle = new Map(scenes.map((s) => [s.id, s.title] as const))
+    const labels: Record<string, string> = {}
+    for (const shot of shots) {
+      const scene = sceneTitle.get(shot.sceneId)
+      labels[shot.id] = scene
+        ? `${shot.title || `Shot ${shot.order}`} · ${scene}`
+        : shot.title || `Shot ${shot.order}`
+    }
+    return labels
+  }, [scenes, shots])
 
   if (!projectId) {
     return (
@@ -377,9 +455,9 @@ export function ProjectPage() {
           </div>
           <StatusBadge
             status={
-              workflowStatus === 'completed'
+              workflowStatus === 'completed' || project.status === 'completed'
                 ? 'completed'
-                : workflowStatus === 'failed'
+                : workflowStatus === 'failed' || project.status === 'failed'
                   ? 'failed'
                   : workflowStatus === 'running' ||
                       workflowStatus === 'paused' ||
@@ -401,12 +479,22 @@ export function ProjectPage() {
         <ErrorState message={retryError} onRetry={() => setRetryError(null)} />
       ) : null}
 
+      <ProductionIssuesBanner
+        issues={issues}
+        retryingKey={retryingKey}
+        shotLabels={shotLabels}
+        onFixShot={(shotId, mode, guidance) =>
+          void onFixShot(shotId, mode, guidance)
+        }
+        onResumeStuck={() => void onResumeStuck()}
+      />
+
       <section className="space-y-3">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <h2 className="section-title">Storyboard & clips</h2>
             <p className="meta-text mt-1">
-              Left → right film strip. Hover to enlarge, click for full preview, Retry to regenerate.
+              Safety blocks need a new still. Temporary fails can use Retry clip.
             </p>
           </div>
           <Button
@@ -424,6 +512,8 @@ export function ProjectPage() {
           loading={framesLoading}
           retryingKey={retryingKey}
           onRetry={(kind, id) => void onFilmRetry(kind, id)}
+          onRegenerateStill={(shotId) => void onRegenerateStill(shotId)}
+          onAutoFix={(shotId) => void onFixShot(shotId, 'auto_fix')}
         />
       </section>
 
@@ -496,7 +586,14 @@ export function ProjectPage() {
           <ul className="space-y-3">
             {scenes.map((scene) => {
               const sceneShots = shots.filter((s) => s.sceneId === scene.id)
-              const hasFailedShot = sceneShots.some((s) => s.status === 'failed')
+              const hasFailedShot =
+                sceneShots.some((s) => s.status === 'failed') ||
+                sceneShots.some((s) => issueShotIds.has(s.id))
+              const sceneIssues = issues.filter((i) => i.sceneId === scene.id)
+              const hasPolicy = sceneIssues.some(
+                (i) =>
+                  i.code === 'content_policy' || i.code === 'needs_new_image',
+              )
               return (
                 <li
                   key={scene.id}
@@ -508,7 +605,13 @@ export function ProjectPage() {
                         <h3 className="font-medium">
                           Scene {scene.order}: {scene.title}
                         </h3>
-                        <StatusBadge status={scene.status} />
+                        <StatusBadge
+                          status={
+                            hasFailedShot || scene.status === 'failed'
+                              ? 'failed'
+                              : scene.status
+                          }
+                        />
                       </div>
                       <p className="text-sm text-[var(--color-ink-muted)]">
                         {scene.description}
@@ -519,6 +622,12 @@ export function ProjectPage() {
                           ? ` · ${sceneShots.length} shot${sceneShots.length === 1 ? '' : 's'}`
                           : ''}
                       </p>
+                      {hasPolicy ? (
+                        <p className="mt-2 text-sm text-amber-800 dark:text-amber-200">
+                          Safety block on this scene — use &quot;New still +
+                          clip&quot; on the failed shots above, not blind Retry.
+                        </p>
+                      ) : null}
                     </div>
                     <div className="flex shrink-0 flex-col gap-2 sm:items-end">
                       <Button
@@ -528,9 +637,10 @@ export function ProjectPage() {
                         onClick={() => void onFilmRetry('scene', scene.id)}
                       >
                         <RefreshCw className="h-3.5 w-3.5" />
-                        Retry scene
+                        {hasPolicy ? 'Regen scene stills' : 'Retry scene'}
                       </Button>
-                      {(scene.status === 'failed' || hasFailedShot) && (
+                      {(scene.status === 'failed' || hasFailedShot) &&
+                        !hasPolicy && (
                         <Button
                           size="sm"
                           variant="secondary"

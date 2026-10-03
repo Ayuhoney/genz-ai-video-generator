@@ -193,15 +193,31 @@ class FalVideoProvider(VideoProvider):
         )
         clip_id = None
         job_id = (request.extra or {}).get("job_id")
+        force = bool(
+            (request.extra or {}).get("force")
+            or (request.extra or {}).get("regen_token")
+        )
         if request.project_id and (request.scene_id or request.shot_id):
-            clip_id = (
+            # Include job_id so explicit user Retry (new job) is not blocked by a
+            # prior successful fal:clip:idemp key for the same shot.
+            base = (
                 f"{request.project_id}:{request.scene_id or '_'}:{request.shot_id or '_'}"
             )
+            clip_id = f"{base}:{job_id}" if job_id else base
+            if force:
+                from app.providers.fal.clip_controls import idempotency_clear
+
+                idempotency_clear(base)
+                if job_id:
+                    # Also clear any stale claim for this new job id.
+                    idempotency_clear(str(clip_id))
 
         extra = dict(request.extra or {})
         extra.pop("prompt", None)
         extra.pop("resolution", None)
         extra.pop("job_id", None)
+        extra.pop("force", None)
+        extra.pop("regen_token", None)
 
         def on_state(state: str) -> None:
             if not job_id:

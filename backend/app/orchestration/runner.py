@@ -120,6 +120,8 @@ async def get_production_status(project_id: str) -> dict[str, Any]:
     config = thread_config(project_id)
     snapshot = await asyncio.to_thread(graph.get_state, config)
     if not snapshot.values:
+        from app.orchestration.status import collect_project_issues
+
         return {
             "projectId": project_id,
             "status": "pending",
@@ -132,6 +134,7 @@ async def get_production_status(project_id: str) -> dict[str, Any]:
             "shotStatus": {},
             "retryCounts": {},
             "errors": [],
+            "issues": collect_project_issues(project_id),
             "maxRetries": 2,
             "running": _is_running(project_id),
             "interrupted": False,
@@ -140,6 +143,23 @@ async def get_production_status(project_id: str) -> dict[str, Any]:
     payload = production_status_payload(snapshot.values)
     payload["running"] = _is_running(project_id)
     payload["interrupted"] = bool(snapshot.interrupts)
+    # Mongo project status wins when final assembly already marked completed.
+    try:
+        from app.workers.project_context import get_project_doc
+
+        project = get_project_doc(project_id) or {}
+        if str(project.get("status") or "") == "completed":
+            payload["status"] = "completed"
+            payload["running"] = False
+            payload["issues"] = []
+            for step in payload.get("steps") or []:
+                step["status"] = "completed"
+            for scene in payload.get("scenes") or []:
+                scene["status"] = "completed"
+            for shot in payload.get("shots") or []:
+                shot["status"] = "completed"
+    except Exception:
+        pass
     return payload
 
 
@@ -182,6 +202,9 @@ async def regenerate_production(
     *,
     scene_ids: list[str] | None = None,
     shot_ids: list[str] | None = None,
+    include_stills: bool = False,
+    motion_mode: str = "auto",
+    prompt_overrides: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     import uuid
 
@@ -229,11 +252,36 @@ async def regenerate_production(
 
     scene_status = dict(values.get("scene_status") or {})
     shot_status = dict(values.get("shot_status") or {})
+    image_ready = set(values.get("image_ready_shot_ids") or [])
     for sid in set(scene_ids) | parent_scenes:
         scene_status[sid] = "pending"
+    target_shot_ids = set(shot_ids)
     for shot in shots:
         if shot["id"] in shot_ids or shot["scene_id"] in scene_ids:
             shot_status[shot["id"]] = "pending"
+            target_shot_ids.add(shot["id"])
+            if include_stills or shot["scene_id"] in scene_ids:
+                image_ready.discard(shot["id"])
+
+    # Start story cursor on the earliest targeted scene.
+    target_scenes = sorted(
+        {
+            str(s.get("scene_id") or s.get("id"))
+            for s in (values.get("shots") or [])
+            if s.get("id") in target_shot_ids
+        }
+        | set(scene_ids)
+        | parent_scenes,
+        key=lambda sid: next(
+            (
+                int(sc.get("order") or 0)
+                for sc in (values.get("scenes") or [])
+                if str(sc.get("id")) == sid
+            ),
+            0,
+        ),
+    )
+    active = target_scenes[0] if target_scenes else ""
 
     update = {
         "scenes": scenes,
@@ -242,14 +290,22 @@ async def regenerate_production(
         "shot_status": shot_status,
         "regenerate_scene_ids": scene_ids,
         "regenerate_shot_ids": shot_ids,
+        "video_prompt_overrides": dict(prompt_overrides or {}),
+        "video_motion_mode": motion_mode or "auto",
+        "active_scene_id": active,
+        "image_ready_shot_ids": sorted(image_ready),
         "regen_token": regen_token,
         "status": "running",
         "pause_reason": "",
         "current_step": "video_generation_planning",
     }
 
-    # Scene regen redoes stills; shot-only skips asset_planning via empty scene list.
-    as_node = "shot_planning" if scene_ids else "asset_planning"
+    # Scene / new_still → re-enter before asset_planning (Flux still + Wan clip).
+    # Clip-only → as_node=asset_planning so next node is video_generation_planning.
+    if scene_ids or include_stills:
+        as_node = "shot_planning"
+    else:
+        as_node = "asset_planning"
 
     def _apply_and_continue() -> None:
         try:
@@ -271,6 +327,65 @@ async def regenerate_production(
         "message": "Partial regeneration scheduled",
         "scene_ids": scene_ids,
         "shot_ids": shot_ids,
+    }
+
+
+async def fix_shot_production(
+    project_id: str,
+    *,
+    shot_id: str,
+    mode: str = "auto_fix",
+    guidance: str | None = None,
+) -> dict[str, Any]:
+    """User-friendly fix: auto safe motion, guided notes, retry, or new still."""
+    from app.providers.fal.prompt_fix import rewrite_motion_prompt
+
+    mode_norm = (mode or "auto_fix").strip().lower()
+    if mode_norm not in {"auto_fix", "guided", "retry", "new_still"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="mode must be auto_fix, guided, retry, or new_still",
+        )
+
+    overrides: dict[str, str] = {}
+    motion_mode = "auto"
+    include_stills = False
+    message = "Clip retry scheduled with safe motion prompt"
+
+    if mode_norm == "new_still":
+        include_stills = True
+        motion_mode = "ultra"
+        message = "New still + clip scheduled"
+    elif mode_norm == "auto_fix":
+        motion_mode = "ultra"
+        overrides[shot_id] = rewrite_motion_prompt(None, mode="ultra")
+        message = "AI safe-motion clip retry scheduled (no story/weapons in prompt)"
+    elif mode_norm == "guided":
+        notes = (guidance or "").strip()
+        if not notes:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="guidance is required for guided mode (camera/mood notes)",
+            )
+        motion_mode = "guided"
+        overrides[shot_id] = rewrite_motion_prompt(notes, mode="guided")
+        message = "Clip retry scheduled with your camera/mood notes"
+    else:  # retry
+        motion_mode = "auto"
+        message = "Clip retry scheduled (motion-only prompt)"
+
+    result = await regenerate_production(
+        project_id,
+        shot_ids=[shot_id],
+        include_stills=include_stills,
+        motion_mode=motion_mode,
+        prompt_overrides=overrides,
+    )
+    return {
+        **result,
+        "mode": mode_norm,
+        "message": message,
+        "motionPrompt": overrides.get(shot_id),
     }
 
 

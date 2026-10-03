@@ -20,8 +20,11 @@ RUN pip install --upgrade pip \
     && pip install -r requirements.txt
 
 COPY app ./app
-RUN chown -R app:app /app
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chown -R app:app /app \
+    && chmod +x /docker-entrypoint.sh
 
-USER app
-
+# Stay root for entrypoint so named-volume /data/media can be chowned to app.
+USER root
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["sh", "-c", "celery -A app.workers.celery_app.celery_app worker --loglevel=${CELERY_LOGLEVEL:-INFO} -Q media,audio,ffmpeg,celery --concurrency=${CELERY_CONCURRENCY:-2}"]

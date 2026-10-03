@@ -55,8 +55,8 @@ def test_image_metadata_stores_scene_and_final_prompt(monkeypatch) -> None:
     assert "chai" in meta["image_prompt_final"].lower()
     assert "gore" not in meta["image_prompt_final"].lower()
     assert "video_prompt_final" in meta
-    # Video path keeps scene words after strip-only soften.
+    # Wan path is motion/camera only — story stays in the still, not the clip prompt.
     video_final = motion_only_prompt(scene)
-    assert "chai" in video_final.lower()
-    assert "stall" in video_final.lower()
+    assert "cinematic slow motion" in video_final.lower()
     assert "gore" not in video_final.lower()
+    assert "fight" not in video_final.lower()

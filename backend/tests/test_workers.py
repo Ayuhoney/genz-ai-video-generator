@@ -22,6 +22,32 @@ def _db():
     return db
 
 
+def _seed_shot_still(
+    project_id: str,
+    *,
+    scene_id: str,
+    shot_id: str,
+) -> None:
+    """Video jobs require a per-shot still before i2v."""
+    from app.storage import get_storage
+    from app.storage.asset_store import create_asset
+
+    key = f"projects/{project_id}/scenes/{scene_id}/shots/{shot_id}/image/still.png"
+    get_storage().upload(key, b"PNGSTILL", content_type="image/png")
+    create_asset(
+        _db(),
+        project_id=project_id,
+        scene_id=scene_id,
+        shot_id=shot_id,
+        asset_type="image",
+        r2_key=key,
+        mime="image/png",
+        size=8,
+        provider="mock",
+        cost=0.0,
+    )
+
+
 def test_redis_ssl_helper_for_rediss() -> None:
     assert celery_broker_use_ssl("redis://localhost:6379/0") is None
     ssl_opts = celery_broker_use_ssl("rediss://example:6380/0", cert_reqs="none")
@@ -58,6 +84,10 @@ def test_parallel_shot_dispatch_and_progress(orchestration_db) -> None:
         {"id": "scene-1-shot-1", "scene_id": "scene-1", "_attempt": 0},
         {"id": "scene-1-shot-2", "scene_id": "scene-1", "_attempt": 0},
     ]
+    for shot in shots:
+        _seed_shot_still(
+            project_id, scene_id=shot["scene_id"], shot_id=shot["id"]
+        )
     job_ids = dispatch_shot_video_jobs(project_id, shots)
     assert len(job_ids) >= 2
     db = _db()
@@ -70,6 +100,7 @@ def test_parallel_shot_dispatch_and_progress(orchestration_db) -> None:
 def test_simulated_failure_and_retry_path(orchestration_db) -> None:
     db = _db()
     project_id = f"p-{uuid.uuid4().hex[:8]}"
+    _seed_shot_still(project_id, scene_id="scene-1", shot_id="shot-fail")
     job = create_job(
         project_id=project_id,
         task_type="video",

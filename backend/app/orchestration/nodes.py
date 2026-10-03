@@ -237,6 +237,8 @@ def process_scene_items(
         # Clear regenerate targets after a successful pass.
         updates["regenerate_scene_ids"] = []
         updates["regenerate_shot_ids"] = []
+        updates["video_prompt_overrides"] = {}
+        updates["video_motion_mode"] = "auto"
 
     return updates
 
@@ -356,48 +358,88 @@ def shot_planning(state: WorkflowState) -> WorkflowState:
 
 
 def asset_planning(state: WorkflowState) -> WorkflowState:
+    """Flux stills for the active story scene only (one beat at a time)."""
     from app.orchestration.job_bridge import maybe_await_or_reconcile, reconcile_pending_jobs
+    from app.orchestration.story_flow import active_scene, scene_needs_images, shots_for_scene
     from app.workers.dispatch import dispatch_image_jobs
 
     step = "asset_planning"
-    if state.get("awaiting_jobs"):
-        return reconcile_pending_jobs(state, step=step)
+    working: WorkflowState = dict(state)  # type: ignore[assignment]
+    if working.get("awaiting_jobs"):
+        return reconcile_pending_jobs(working, step=step)
 
-    scene_ids = [
-        scene["id"]
-        for scene in state.get("scenes") or []
-        if _should_process_scene(state, scene["id"])
-    ]
-    # Shot-only regenerate: skip still regen (reuse existing image).
-    if state.get("regenerate_shot_ids") and not (state.get("regenerate_scene_ids") or []):
-        scene_ids = []
-    if not scene_ids and not (state.get("regenerate_shot_ids") or state.get("regenerate_scene_ids")):
-        scene_ids = [scene["id"] for scene in state.get("scenes") or []]
-
-    if not scene_ids:
+    scene = active_scene(working)
+    if scene is None:
         return {
-            **state,
+            **working,
             "awaiting_jobs": False,
             "pending_job_ids": [],
             "status": "running",
             "pause_reason": "",
             "current_step": step,
+            "active_scene_id": "",
+        }
+
+    scene_id = str(scene["id"])
+    working["active_scene_id"] = scene_id
+
+    if not scene_needs_images(working, scene_id):
+        # Stills already ready — advance straight to video for this beat.
+        return {
+            **working,
+            "awaiting_jobs": False,
+            "pending_job_ids": [],
+            "status": "running",
+            "pause_reason": "",
+            "current_step": step,
+            "active_scene_id": scene_id,
+        }
+
+    image_ready = set(working.get("image_ready_shot_ids") or [])
+    regen_shots = set(working.get("regenerate_shot_ids") or [])
+    regen_scenes = set(working.get("regenerate_scene_ids") or [])
+    shots_for_images = []
+    for shot in shots_for_scene(working, scene_id):
+        sid = str(shot["id"])
+        force = sid in regen_shots or scene_id in regen_scenes
+        if force or sid not in image_ready:
+            if force:
+                image_ready.discard(sid)
+            shots_for_images.append(shot)
+    working["image_ready_shot_ids"] = sorted(image_ready)
+
+    if not shots_for_images:
+        return {
+            **working,
+            "awaiting_jobs": False,
+            "pending_job_ids": [],
+            "status": "running",
+            "pause_reason": "",
+            "current_step": step,
+            "active_scene_id": scene_id,
         }
 
     job_ids = dispatch_image_jobs(
-        state["project_id"],
-        scene_ids,
-        regen_token=state.get("regen_token"),
+        working["project_id"],
+        shots_for_images,
+        regen_token=working.get("regen_token"),
     )
-    return maybe_await_or_reconcile(state, step=step, job_ids=job_ids)
+    result = maybe_await_or_reconcile(working, step=step, job_ids=job_ids)
+    return {**result, "active_scene_id": scene_id}
 
 
 def video_generation_planning(state: WorkflowState) -> WorkflowState:
-    """Scene-level execution: parallel shots per scene; stop on failure."""
+    """Wan clips for the active story scene only; then hand off to next beat."""
     from app.orchestration.job_bridge import (
         jobs_terminal,
         maybe_await_or_reconcile,
         reconcile_pending_jobs,
+    )
+    from app.orchestration.story_flow import (
+        active_scene,
+        next_active_scene_id,
+        scene_needs_video,
+        shots_for_scene,
     )
     from app.workers.dispatch import dispatch_shot_video_jobs
 
@@ -406,7 +448,6 @@ def video_generation_planning(state: WorkflowState) -> WorkflowState:
 
     if working.get("awaiting_jobs"):
         reconciled = reconcile_pending_jobs(working, step=step)
-        # Still waiting on workers, or a recoverable/fatal failure.
         if reconciled.get("awaiting_jobs"):
             return reconciled
         if reconciled.get("status") == "failed":
@@ -416,52 +457,94 @@ def video_generation_planning(state: WorkflowState) -> WorkflowState:
         ).startswith("Failed"):
             return reconciled
         working = {**working, **reconciled}
+        # Point cursor at the next incomplete beat (or clear when story visuals done).
+        working["active_scene_id"] = next_active_scene_id(working) or ""
+        return {
+            **working,
+            "awaiting_jobs": False,
+            "pending_job_ids": [],
+            "status": working.get("status") or "running",
+            "pause_reason": working.get("pause_reason") or "",
+            "current_step": step,
+        }
 
-    scenes = sorted(working.get("scenes") or [], key=lambda s: s.get("order", 0))
+    scene = active_scene(working)
+    if scene is None:
+        return {
+            **working,
+            "awaiting_jobs": False,
+            "pending_job_ids": [],
+            "status": "running",
+            "pause_reason": "",
+            "current_step": step,
+            "active_scene_id": "",
+        }
+
+    scene_id = str(scene["id"])
+    working["active_scene_id"] = scene_id
+
+    if not scene_needs_video(working, scene_id):
+        return {
+            **working,
+            "active_scene_id": next_active_scene_id(working) or "",
+            "awaiting_jobs": False,
+            "pending_job_ids": [],
+            "status": "running",
+            "pause_reason": "",
+            "current_step": step,
+        }
+
+    shot_status = working.get("shot_status") or {}
+    shots = [
+        shot
+        for shot in shots_for_scene(working, scene_id)
+        if shot_status.get(shot["id"]) != "completed"
+    ]
+    if not shots:
+        return {
+            **working,
+            "active_scene_id": next_active_scene_id(working) or "",
+            "awaiting_jobs": False,
+            "pending_job_ids": [],
+            "status": "running",
+            "pause_reason": "",
+            "current_step": step,
+        }
+
     fail_shot_ids = set(working.get("fail_shot_ids") or [])
     retry_counts = dict(working.get("retry_counts") or {})
+    fail_shots = set(fail_shot_ids)
+    if scene_id in (working.get("fail_scene_ids") or []) and retry_counts.get(
+        scene_id, 0
+    ) < 1:
+        for shot in shots:
+            fail_shots.add(shot["id"])
 
-    for scene in scenes:
-        scene_id = scene["id"]
-        if not _should_process_scene(working, scene_id):
-            continue
-        if (working.get("scene_status") or {}).get(scene_id) == "completed":
-            continue
+    attempt = retry_counts.get(scene_id, 0)
+    annotated = [{**shot, "_attempt": attempt} for shot in shots]
+    overrides = dict(working.get("video_prompt_overrides") or {})
+    motion_mode = str(working.get("video_motion_mode") or "auto")
+    job_ids = dispatch_shot_video_jobs(
+        working["project_id"],
+        annotated,
+        fail_shot_ids=fail_shots,
+        regen_token=working.get("regen_token"),
+        prompt_overrides=overrides,
+        motion_mode=motion_mode,
+    )
 
-        shots = [
-            shot
-            for shot in working.get("shots") or []
-            if shot["scene_id"] == scene_id and _should_process_shot(working, shot)
-        ]
-        if not shots:
-            continue
+    if not jobs_terminal(job_ids):
+        return {
+            **maybe_await_or_reconcile(working, step=step, job_ids=job_ids),
+            "active_scene_id": scene_id,
+        }
 
-        fail_shots = set(fail_shot_ids)
-        if scene_id in (working.get("fail_scene_ids") or []) and retry_counts.get(
-            scene_id, 0
-        ) < 1:
-            for shot in shots:
-                fail_shots.add(shot["id"])
+    reconciled = maybe_await_or_reconcile(working, step=step, job_ids=job_ids)
+    working = {**working, **reconciled}
+    if working.get("status") in {"paused", "failed"}:
+        return {**working, "active_scene_id": scene_id}
 
-        attempt = retry_counts.get(scene_id, 0)
-        annotated = [{**shot, "_attempt": attempt} for shot in shots]
-        job_ids = dispatch_shot_video_jobs(
-            working["project_id"],
-            annotated,
-            fail_shot_ids=fail_shots,
-            regen_token=working.get("regen_token"),
-        )
-
-        if not jobs_terminal(job_ids):
-            return maybe_await_or_reconcile(working, step=step, job_ids=job_ids)
-
-        reconciled = maybe_await_or_reconcile(working, step=step, job_ids=job_ids)
-        working = {**working, **reconciled}
-        retry_counts = dict(working.get("retry_counts") or {})
-        if working.get("status") in {"paused", "failed"}:
-            return working
-
-    # Keep regenerate_* until assembly so scene_render/final force correctly.
+    working["active_scene_id"] = next_active_scene_id(working) or ""
     return {
         **working,
         "awaiting_jobs": False,
@@ -562,6 +645,9 @@ def finalization(state: WorkflowState) -> WorkflowState:
         "pending_job_ids": [],
         "regenerate_scene_ids": [],
         "regenerate_shot_ids": [],
+        "video_prompt_overrides": {},
+        "video_motion_mode": "auto",
+        "active_scene_id": "",
         "regen_token": "",
     }
 

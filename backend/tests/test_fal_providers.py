@@ -316,6 +316,80 @@ def test_fal_video_provider_i2v_mocked(monkeypatch) -> None:
     assert result.metadata["model"] == model
 
 
+def test_video_retry_uses_job_scoped_clip_id(monkeypatch) -> None:
+    """User Retry must not be blocked by a prior shot-level fal idempotency key."""
+    cleared: list[str] = []
+    seen: dict[str, str | None] = {}
+
+    class FakeClip:
+        video_url = "https://cdn.example/clip.mp4"
+        result = {"video": {"url": "https://cdn.example/clip.mp4"}}
+        metrics = {"request_id": "req-2"}
+        model_id = "fal-ai/wan-25-preview/image-to-video"
+        prompt_used = "pan"
+        image_url = "https://cdn.example/scene.png"
+        request_id = "req-2"
+        attempts = 1
+        prompt_sanitize_level = 0
+        estimated_cost_usd = 0.05
+        model_chain_used = ["fal-ai/wan-25-preview/image-to-video"]
+
+    class FakeClient(FalClient):
+        def __init__(self, *a, **k):
+            super().__init__(
+                "test-fal-key",
+                poll_interval=0.01,
+                poll_timeout=5,
+                http_client=httpx.Client(
+                    transport=httpx.MockTransport(lambda _r: httpx.Response(404))
+                ),
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, url: str) -> bytes:
+            return b"MP4DATA"
+
+    def fake_generate_clip(client, request, **_kwargs):
+        seen["clip_id"] = request.clip_id
+        return FakeClip()
+
+    monkeypatch.setattr(
+        "app.providers.fal.image_video._make_client",
+        lambda: FakeClient("test-fal-key"),
+    )
+    monkeypatch.setattr(
+        "app.providers.fal.image_video.generate_clip",
+        fake_generate_clip,
+    )
+    monkeypatch.setattr(
+        "app.providers.fal.clip_controls.idempotency_clear",
+        lambda cid: cleared.append(cid),
+    )
+
+    FalVideoProvider().generate(
+        VideoRequest(
+            project_id="proj1",
+            scene_id="scene-3",
+            shot_id="shot-6",
+            prompt="pan left",
+            duration_seconds=5,
+            image_url="https://cdn.example/scene.png",
+            extra={
+                "job_id": "job-retry-1",
+                "force": True,
+                "regen_token": "tok-1",
+            },
+        )
+    )
+    assert seen["clip_id"] == "proj1:scene-3:shot-6:job-retry-1"
+    assert "proj1:scene-3:shot-6" in cleared
+
+
 def test_fal_requires_model_env(monkeypatch) -> None:
     monkeypatch.setenv("FAL_IMAGE_MODEL", "")
     get_settings.cache_clear()
@@ -364,13 +438,31 @@ def test_produce_video_uses_shot_duration(
     monkeypatch.setenv("PROVIDER_VIDEO", "mock")
     get_settings.cache_clear()
     get_worker_settings.cache_clear()
-    from app.storage import reset_storage_cache
+    from app.storage import get_storage, reset_storage_cache
+    from app.storage.asset_store import create_asset
 
     reset_storage_cache()
 
     settings = get_settings()
     db = job_store.get_db(settings.mongodb_url, settings.mongodb_db_name)
     project_id = f"p-{uuid.uuid4().hex[:8]}"
+    # Each shot video requires that shot's own still.
+    still_key = (
+        f"projects/{project_id}/scenes/scene-1/shots/scene-1-shot-1/image/still.png"
+    )
+    get_storage().upload(still_key, b"PNGSTILL", content_type="image/png")
+    create_asset(
+        db,
+        project_id=project_id,
+        scene_id="scene-1",
+        shot_id="scene-1-shot-1",
+        asset_type="image",
+        r2_key=still_key,
+        mime="image/png",
+        size=8,
+        provider="mock",
+        cost=0.0,
+    )
     job = job_store.create_or_get_job(
         db,
         project_id=project_id,

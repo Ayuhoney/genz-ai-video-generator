@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 # WAN v2.2 a14b hard ceiling for a single fal clip (~15s).
 FAL_WAN_MAX_CLIP_SECONDS = 15
 # Planned shots may be shorter (remainder beats); fal still clamps at submit.
@@ -14,6 +16,15 @@ _SHOT_BEAT_LABELS = (
     "medium shot",
     "close-up",
 )
+
+# Wan i2v: never send story/weapons — only camera + atmosphere (fal policy-safe).
+DEFAULT_SAFE_MOTION_PROMPT = (
+    "Cinematic slow motion, camera pans smoothly around the character, "
+    "dust particles floating in the air, cinematic studio lighting, "
+    "professional movie sequence, no deformation."
+)
+
+_MOTION_MARKER = "Cinematic slow motion,"
 
 
 def clip_seconds_from_settings(settings: object | None = None) -> int:
@@ -97,13 +108,11 @@ def shot_beat_description(scene_text: str, index: int, total: int) -> str:
     return f"{label}: {base}"
 
 
-# Appended after story text. Must NOT contain fal-flagged tokens (gore/blood/injury
-# even as "no gore" still trip wan turbo content checker).
+# Appended after story text for *image* (Flux) prompts only.
 _SOFT_VISUAL_SUFFIX = (
     "Cinematic film still, dramatic lighting, premium Hollywood color grade, "
     "tasteful PG-13 drama."
 )
-_MOTION_SAFE_SUFFIX = "Tasteful cinematic motion, premium color grade."
 
 
 def soft_visual_prompt(text: str) -> str:
@@ -114,40 +123,138 @@ def soft_visual_prompt(text: str) -> str:
     raw = (text or "").strip() or "cinematic film moment"
     if "Cinematic film still, dramatic lighting, premium Hollywood color grade" in raw:
         return raw
-    base = _soften_blocked_terms(raw)
+    base = _soften_blocked_terms(raw) or "cinematic film moment"
     return f"{base}. {_SOFT_VISUAL_SUFFIX}"
 
 
-def motion_only_prompt(text: str | None = None) -> str:
-    """Keep full scene/shot text; only strip blocked words. Add light camera cue.
+_CAMERA_CUE_RE = re.compile(
+    r"("
+    r"(?:slow\s+)?(?:push[- ]?in|pull[- ]?out|pan|tilt|dolly|orbit|track(?:ing)?|"
+    r"crane|handheld|steadicam|zoom|parallax|rack\s+focus)|"
+    r"(?:wide|medium|close[- ]?up|establishing)\s+shot|"
+    r"(?:slow\s+motion|cinematic\s+lighting|studio\s+lighting|"
+    r"dust\s+particles|volumetric\s+light|god\s+rays|lens\s+flare|"
+    r"shallow\s+depth|bokeh|golden\s+hour|soft\s+light)"
+    r")",
+    re.IGNORECASE,
+)
 
-    Idempotent: already-wrapped prompts are returned unchanged.
+# Extra strip for Wan prompts (story/weapons must not reach the video model).
+_WAN_STORY_BLOCKED: tuple[str, ...] = (
+    "sword",
+    "talwar",
+    "arrow",
+    "bow",
+    "spear",
+    "blade",
+    "weapon",
+    "gun",
+    "rifle",
+    "pistol",
+    "knife",
+    "dagger",
+    "fight",
+    "battle",
+    "war",
+    "kill",
+    "murder",
+    "attack",
+    "violence",
+    "violent",
+    "blood",
+    "bloody",
+    "gore",
+    "wound",
+    "explode",
+    "explosion",
+    "decapitat",
+    "dismember",
+    "mutilat",
+    "suicide",
+    "rape",
+    "porn",
+    "nsfw",
+    "nude",
+    "naked",
+    "sex",
+)
+
+
+def _extract_camera_cues(text: str) -> str:
+    """Pull only camera/atmosphere phrases; drop story/weapons."""
+    cleaned = _soften_blocked_terms(text or "", extra=_WAN_STORY_BLOCKED)
+    if not cleaned:
+        return ""
+    hits = [m.group(0).strip() for m in _CAMERA_CUE_RE.finditer(cleaned)]
+    # Dedupe preserving order
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for h in hits:
+        key = h.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(h)
+    if uniq:
+        return ", ".join(uniq)
+    # If the whole string looks like a short camera note (no long story), keep it.
+    words = cleaned.split()
+    if len(words) <= 12 and not any(
+        w in cleaned.lower()
+        for w in ("rescue", "kidnap", "criminal", "enemy", "warrior", "ramayan", "rama")
+    ):
+        return cleaned
+    return ""
+
+
+def motion_only_prompt(
+    text: str | None = None,
+    *,
+    camera: str | None = None,
+) -> str:
+    """Wan i2v prompt: camera + atmosphere only — never full story/weapons.
+
+    Idempotent when already a safe motion prompt.
     """
     raw = (text or "").strip()
-    marker = "Cinematic camera motion,"
-    if marker in raw or raw.startswith("Cinematic camera:") or raw.startswith(
-        "Dynamic cinematic camera:"
+    if (
+        _MOTION_MARKER in raw
+        or raw.startswith("Cinematic camera:")
+        or DEFAULT_SAFE_MOTION_PROMPT.rstrip(".") in raw.rstrip(".")
     ):
-        return raw
-    scene = _soften_blocked_terms(raw)
-    if not scene:
-        return ultra_safe_motion_prompt()
-    return f"{scene}. {marker} natural movement, dramatic lighting. {_MOTION_SAFE_SUFFIX}"
+        # Already motion-shaped — return canonical safe prompt (idempotent).
+        if DEFAULT_SAFE_MOTION_PROMPT.rstrip(".") in raw.rstrip("."):
+            # Keep any leading camera cues before the safe block.
+            idx = raw.rstrip(".").find(DEFAULT_SAFE_MOTION_PROMPT.rstrip("."))
+            prefix = raw[:idx].strip(" .,")
+            if prefix:
+                scrubbed = _soften_blocked_terms(prefix, extra=_WAN_STORY_BLOCKED)
+                if scrubbed:
+                    return f"{scrubbed}. {DEFAULT_SAFE_MOTION_PROMPT}"
+            return DEFAULT_SAFE_MOTION_PROMPT
+        scrubbed = _soften_blocked_terms(raw, extra=_WAN_STORY_BLOCKED)
+        return scrubbed or DEFAULT_SAFE_MOTION_PROMPT
+
+    cues: list[str] = []
+    cam = _extract_camera_cues(camera or "")
+    if cam:
+        cues.append(cam)
+    from_text = _extract_camera_cues(raw)
+    if from_text and from_text.lower() not in {c.lower() for c in cues}:
+        cues.append(from_text)
+
+    if not cues:
+        return DEFAULT_SAFE_MOTION_PROMPT
+    return f"{', '.join(cues)}. {DEFAULT_SAFE_MOTION_PROMPT}"
 
 
 def ultra_safe_motion_prompt(text: str | None = None) -> str:
-    """Fallback after content reject — still keeps scene text when available."""
-    scene = _soften_blocked_terms((text or "").strip())
-    base = (
-        "Cinematic camera: slow push-in, subtle parallax, natural ambient movement, "
-        f"warm dramatic lighting. {_MOTION_SAFE_SUFFIX}"
-    )
-    if scene:
-        return f"{scene}. {base}"
-    return base
+    """Fallback after content reject — fixed motion-only prompt (ignores story)."""
+    _ = text  # intentionally unused; image carries the scene
+    return DEFAULT_SAFE_MOTION_PROMPT
 
 
-# Strip-only blocklist (no synonym rewrites that change story meaning).
+# Strip-only blocklist for image prompts (no synonym rewrites).
 _BLOCKED_WORDS: tuple[str, ...] = (
     "decapitation",
     "dismemberment",
@@ -165,19 +272,24 @@ _BLOCKED_WORDS: tuple[str, ...] = (
 )
 
 
-def _soften_blocked_terms(text: str) -> str:
+def _soften_blocked_terms(
+    text: str,
+    *,
+    extra: tuple[str, ...] | list[str] | None = None,
+) -> str:
     """Remove blocked words only — never rewrite story meaning."""
-    import re
-
     out = text or ""
-    for word in sorted(_BLOCKED_WORDS, key=len, reverse=True):
+    words = list(_BLOCKED_WORDS)
+    if extra:
+        words.extend(extra)
+    for word in sorted(set(words), key=len, reverse=True):
         out = re.sub(rf"\b{re.escape(word)}\w*\b", "", out, flags=re.IGNORECASE)
     out = re.sub(r"\s{2,}", " ", out)
     out = re.sub(r"\s+,", ",", out)
     out = out.strip(" ,.-")
-    return out or "cinematic film moment"
+    return out or ""
 
 
 # Back-compat alias used by older imports/tests.
 def _scrub_risky_words(text: str) -> str:
-    return _soften_blocked_terms(text)
+    return _soften_blocked_terms(text) or "cinematic film moment"

@@ -153,6 +153,13 @@ def load_director_plan_for_production(
             text = str(vo.get("text") or "").strip()
             if not text:
                 continue
+            linked_shot = str(
+                vo.get("shot_id")
+                or vo.get("shotId")
+                or vo.get("linked_shot_id")
+                or vo.get("linkedShotId")
+                or ""
+            ).strip() or None
             vo_norm.append(
                 {
                     "id": str(vo.get("id") or f"{sid}-vo-{i}"),
@@ -162,6 +169,7 @@ def load_director_plan_for_production(
                         or vo.get("character_name")
                         or "Narrator"
                     ),
+                    "shot_id": linked_shot,
                     "text": text,
                     "estimated_seconds": float(
                         vo.get("estimatedSeconds")
@@ -206,20 +214,9 @@ def load_director_plan_for_production(
                 )
             )
         scene_dur = max(1, scene_dur or max_shot)
-        scenes.append(
-            {
-                "id": sid,
-                "order": int(sc.get("order") or index),
-                "title": title,
-                "description": desc or title,
-                "duration_seconds": scene_dur,
-                "status": "pending",
-                "narration": narration,
-                "voice_over": vo_norm,
-            }
-        )
         # Always split to max SHOT_DURATION_SECONDS; keep distinct beat text.
         durs = plan_shot_durations(scene_dur, max_clip=max_shot)
+        scene_shot_rows: list[dict[str, Any]] = []
         for s_i, dur in enumerate(durs, start=1):
             sh = (
                 scene_shots[s_i - 1]
@@ -235,17 +232,47 @@ def load_director_plan_for_production(
                 first = scene_shots[0] if isinstance(scene_shots[0], dict) else {}
                 if raw_desc == str(first.get("description") or "").strip():
                     raw_desc = shot_beat_description(desc or title, s_i, len(durs))
-            shots.append(
-                {
-                    "id": str(sh.get("id") or f"{sid}-shot-{s_i}"),
-                    "scene_id": sid,
-                    "order": int(sh.get("order") or s_i),
-                    "title": str(sh.get("title") or f"{title} / Shot {s_i}"),
-                    "description": raw_desc,
-                    "status": "pending",
-                    "duration_seconds": float(dur),
-                }
-            )
+            row = {
+                "id": str(sh.get("id") or f"{sid}-shot-{s_i}"),
+                "scene_id": sid,
+                "order": int(sh.get("order") or s_i),
+                "title": str(sh.get("title") or f"{title} / Shot {s_i}"),
+                "description": raw_desc,
+                "camera": str(sh.get("camera") or "").strip(),
+                "status": "pending",
+                "duration_seconds": float(dur),
+            }
+            scene_shot_rows.append(row)
+            shots.append(row)
+        # Auto-link dialogue lines to shots when director omitted shotId (1:1 / even pack).
+        from app.media.audio_timeline import assign_lines_to_shots
+
+        line_shot_map = assign_lines_to_shots(
+            [str(v["id"]) for v in vo_norm],
+            [str(r["id"]) for r in scene_shot_rows],
+            explicit={
+                str(v["id"]): str(v["shot_id"])
+                for v in vo_norm
+                if v.get("shot_id")
+            },
+        )
+        for v in vo_norm:
+            if not v.get("shot_id"):
+                v["shot_id"] = line_shot_map.get(str(v["id"])) or None
+        scenes.append(
+            {
+                "id": sid,
+                "order": int(sc.get("order") or index),
+                "title": title,
+                "description": desc or title,
+                "duration_seconds": scene_dur,
+                "status": "pending",
+                "narration": narration,
+                "voice_over": vo_norm,
+                "voiceOver": vo_norm,
+                "shots": scene_shot_rows,
+            }
+        )
 
     if not scenes:
         return None
@@ -372,11 +399,20 @@ def list_characters(project_id: str) -> list[dict[str, str]]:
         desc = str(char.get("description") or "").strip()
         if not name and not desc:
             continue
+        role = str(char.get("role") or "").strip()
+        gender_raw = str(char.get("gender") or "").strip()
+        if not gender_raw:
+            # Persist inferred gender so TTS mapping does not rely on name endings alone.
+            from app.media.audio_timeline import infer_gender
+
+            gender_raw = infer_gender(name, desc, role)
         out.append(
             {
                 "id": str(char.get("id") or ""),
                 "name": name or "Character",
                 "description": desc,
+                "role": role,
+                "gender": gender_raw,
                 "url": (
                     char.get("reference_image_url")
                     or char.get("referenceImageUrl")
@@ -401,8 +437,221 @@ def character_bible_prompt(project_id: str) -> str:
     joined = " | ".join(bits)
     return (
         f"CHARACTER BIBLE (keep identical faces/costumes in every shot): {joined}. "
-        "Same age, skin tone, hairstyle, wardrobe, and facial features for each named person."
+        "Same age, skin tone, hairstyle, wardrobe, and facial features for each named person. "
+        "All named people are Indian / South Asian unless the character description says otherwise."
     )
+
+
+def locale_visual_lock(project_id: str) -> str:
+    """Force Indian/Mumbai (or project locale) visuals so Flux does not invent foreign faces."""
+    doc = get_project_doc(project_id) or {}
+    language = str(doc.get("language") or "Hindi").strip() or "Hindi"
+    title = str(doc.get("title") or "")
+    idea = str(doc.get("idea") or "")
+    concept = str(doc.get("concept") or "")
+    director = doc.get("director_response") or doc.get("directorResponse") or {}
+    if isinstance(director, dict):
+        title = title or str(director.get("title") or "")
+        concept = concept or str(director.get("concept") or "")
+    blob = f"{title} {idea} {concept}".lower()
+    blob_raw = f"{title} {idea} {concept}"
+
+    places: list[str] = []
+    place_map = (
+        ("mumbai", "Mumbai, India"),
+        ("मुंबई", "Mumbai, India"),
+        ("delhi", "Delhi, India"),
+        ("दिल्ली", "Delhi, India"),
+        ("pune", "Pune, India"),
+        ("bangalore", "Bengaluru, India"),
+        ("bengaluru", "Bengaluru, India"),
+        ("hyderabad", "Hyderabad, India"),
+        ("chennai", "Chennai, India"),
+        ("kolkata", "Kolkata, India"),
+        ("india", "India"),
+        ("भारत", "India"),
+    )
+    for key, label in place_map:
+        if key in blob or key in blob_raw:
+            places.append(label)
+            break
+    if not places and language.lower() in {"hindi", "hi", "hi-in", "marathi", "tamil", "telugu"}:
+        places.append("India")
+
+    place = places[0] if places else "India"
+    return (
+        f"LOCALE LOCK: Setting is {place}. "
+        "All visible people are authentic Indian / South Asian (Indian facial features, "
+        "skin tone, hair). Indian clothing and environment where relevant "
+        "(Indian news studio graphics, Mumbai/Indian streets, Indian police uniforms). "
+        "Do NOT depict East Asian, Chinese, Korean, European, or Western faces "
+        "unless a character description explicitly requires it. No foreign news-channel look."
+    )
+
+
+def characters_present_in_shot(
+    project_id: str,
+    *,
+    shot: dict[str, Any] | None = None,
+    scene_id: str | None = None,
+) -> list[dict[str, str]]:
+    """Characters for a shot: name/role match in shot text; never dump full cast on B-roll."""
+    chars = list_characters(project_id)
+    if not chars:
+        return []
+    shot = shot or {}
+    blob = " ".join(
+        str(shot.get(k) or "")
+        for k in ("title", "description", "camera", "prompt")
+    ).lower()
+    blob_raw = " ".join(
+        str(shot.get(k) or "")
+        for k in ("title", "description", "camera", "prompt")
+    )
+    if blob.strip():
+        named = [
+            c
+            for c in chars
+            if c.get("name") and str(c["name"]).lower() in blob
+        ]
+        if named:
+            return named
+        # Role keywords in English shot plans (Anchor / Reporter / Witness).
+        role_hits: list[dict[str, str]] = []
+        for c in chars:
+            role = str(c.get("role") or "").lower()
+            name = str(c.get("name") or "")
+            keys: list[str] = []
+            if "anchor" in role or "एंकर" in name:
+                keys.extend(["anchor", "news desk", "studio"])
+            if "reporter" in role or "रिपोर्टर" in name:
+                keys.extend(["reporter", "field", "microphone", "mic"])
+            if "witness" in role or "गवाह" in name:
+                keys.extend(["witness", "interview", "statement", "गवाह"])
+            if keys and any(k in blob for k in keys):
+                role_hits.append(c)
+        if role_hits:
+            return role_hits
+
+    # Environment / B-roll: do not force named cast (avoids wrong faces on CCTV).
+    broll_hints = (
+        "cctv",
+        "grainy",
+        "storefront",
+        "police tape",
+        "establishing",
+        "wide angle",
+        "empty street",
+        "crowd only",
+        "aerial",
+    )
+    if any(h in blob for h in broll_hints):
+        return []
+
+    sid = str(scene_id or shot.get("scene_id") or "").strip()
+    if sid:
+        doc = get_project_doc(project_id) or {}
+        director = doc.get("director_response") or doc.get("directorResponse") or {}
+        if isinstance(director, dict):
+            for sc in director.get("scenes") or []:
+                if not isinstance(sc, dict):
+                    continue
+                if str(sc.get("id") or "") != sid:
+                    continue
+                vo = sc.get("voiceOver") or sc.get("voice_over") or []
+                ids: set[str] = set()
+                names: set[str] = set()
+                if isinstance(vo, list):
+                    for item in vo:
+                        if not isinstance(item, dict):
+                            continue
+                        cid = str(
+                            item.get("characterId")
+                            or item.get("character_id")
+                            or ""
+                        ).strip()
+                        cname = str(
+                            item.get("characterName")
+                            or item.get("character_name")
+                            or ""
+                        ).strip().lower()
+                        if cid:
+                            ids.add(cid)
+                        if cname:
+                            names.add(cname)
+                matched = [
+                    c
+                    for c in chars
+                    if (c.get("id") and c["id"] in ids)
+                    or (c.get("name") and c["name"].lower() in names)
+                ]
+                # Only use VO cast when shot clearly depicts people speaking on camera.
+                on_camera = any(
+                    k in blob
+                    for k in (
+                        "anchor",
+                        "reporter",
+                        "witness",
+                        "interview",
+                        "close-up",
+                        "close‑up",
+                        "speaking",
+                        "studio",
+                    )
+                )
+                if matched and on_camera:
+                    return matched
+                break
+    # Never fall back to the full cast — that pulls every face into every frame.
+    return []
+
+
+def character_descriptions_prompt(
+    project_id: str,
+    *,
+    shot: dict[str, Any] | None = None,
+    scene_id: str | None = None,
+) -> str:
+    """Compact look text for characters present in this shot."""
+    chars = characters_present_in_shot(
+        project_id, shot=shot, scene_id=scene_id
+    )
+    if not chars:
+        return ""
+    bits = []
+    for c in chars[:8]:
+        bits.append(
+            f"{c['name']}: {c['description']}" if c.get("description") else c["name"]
+        )
+    return (
+        "Characters in frame (keep identical faces/costumes): "
+        + " | ".join(bits)
+    )
+
+
+def planned_shot_ids_for_scene(project_id: str, scene_id: str) -> list[str]:
+    """Director/production planned shot ids for a scene (story order)."""
+    loaded = load_director_plan_for_production(project_id)
+    if loaded:
+        _plan, _scenes, shots = loaded
+        return [
+            str(s["id"])
+            for s in shots
+            if str(s.get("scene_id") or "") == str(scene_id) and s.get("id")
+        ]
+    try:
+        from app.orchestration.checkpointing import thread_config
+        from app.orchestration.graph import compile_graph
+
+        graph = compile_graph()
+        snapshot = graph.get_state(thread_config(project_id))
+        return [
+            str(s["id"])
+            for s in (snapshot.values or {}).get("shots") or []
+            if str(s.get("scene_id") or "") == str(scene_id) and s.get("id")
+        ]
+    except Exception:
+        return []
 
 
 def locked_character_refs(project_id: str) -> list[dict[str, str]]:

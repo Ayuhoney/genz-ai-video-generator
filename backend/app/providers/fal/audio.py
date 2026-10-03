@@ -27,10 +27,14 @@ def _fal_settings() -> Any:
 
 def _make_client() -> FalClient:
     s = _fal_settings()
+    # Keep audio polls short so hung mmaudio jobs cannot pin both Celery slots.
+    video_poll = float(getattr(s, "fal_poll_timeout_seconds", 600) or 600)
+    audio_poll = float(getattr(s, "fal_audio_poll_timeout_seconds", 180) or 180)
+    poll_timeout = max(30.0, min(audio_poll, video_poll))
     return FalClient(
         (s.fal_key or "").strip(),
         poll_interval=s.fal_poll_interval_seconds,
-        poll_timeout=s.fal_poll_timeout_seconds,
+        poll_timeout=poll_timeout,
         webhook_url=getattr(s, "fal_webhook_url", None),
     )
 

@@ -104,6 +104,35 @@ export type ProductionStageId =
   | 'assembly'
   | 'final_video'
 
+export type ProductionIssueCode =
+  | 'content_policy'
+  | 'needs_new_image'
+  | 'retryable'
+  | 'failed'
+  | 'stuck'
+
+export type ProductionIssueAction =
+  | 'regenerate_still'
+  | 'retry'
+  | 'auto_fix'
+  | 'guided'
+  | 'resume_missing'
+
+export type FixShotMode = 'auto_fix' | 'guided' | 'retry' | 'new_still'
+
+export interface ProductionIssue {
+  shotId?: string | null
+  sceneId?: string | null
+  jobType: string
+  jobStatus: string
+  code: ProductionIssueCode
+  action: ProductionIssueAction
+  message: string
+  error?: string | null
+  stuckJobCount?: number
+  stuckShotIds?: string[]
+}
+
 export interface ProductionStage {
   id: ProductionStageId
   label: string

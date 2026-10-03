@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from celery import Celery
-from celery.signals import worker_process_init
+from celery.signals import worker_process_init, worker_ready
 
 from app.media.ffmpeg_tools import require_ffmpeg_tools
 from app.workers.redis_utils import celery_broker_url, celery_broker_use_ssl
@@ -14,6 +14,19 @@ from app.workers.settings import get_worker_settings
 def _require_ffmpeg_on_worker_start(**_kwargs: object) -> None:
     """Fail fast if ffmpeg/ffprobe are missing on worker hosts."""
     require_ffmpeg_tools()
+
+
+@worker_ready.connect
+def _reclaim_stale_jobs_on_worker_ready(**_kwargs: object) -> None:
+    """After restart, re-queue jobs left in generating/running with no worker."""
+    try:
+        from app.workers.resume_missing import reclaim_stale_jobs_all_projects
+
+        reclaimed = reclaim_stale_jobs_all_projects()
+        if reclaimed:
+            print(f"[worker_ready] reclaimed {len(reclaimed)} stale in-progress job(s)")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[worker_ready] stale reclaim skipped: {exc}")
 
 settings = get_worker_settings()
 

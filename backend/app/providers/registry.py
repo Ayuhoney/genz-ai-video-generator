@@ -198,13 +198,20 @@ def _run_chain(
     try:
         from app.core.config import get_settings
 
-        fal_poll = float(get_settings().fal_poll_timeout_seconds)
-        sarvam_timeout = float(getattr(get_settings(), "sarvam_timeout_seconds", 60) or 60)
+        _s = get_settings()
+        fal_poll = float(_s.fal_poll_timeout_seconds)
+        fal_audio_poll = float(
+            getattr(_s, "fal_audio_poll_timeout_seconds", 180) or 180
+        )
+        sarvam_timeout = float(getattr(_s, "sarvam_timeout_seconds", 60) or 60)
     except Exception:
         from app.workers.settings import get_worker_settings
 
         ws = get_worker_settings()
         fal_poll = float(ws.fal_poll_timeout_seconds)
+        fal_audio_poll = float(
+            getattr(ws, "fal_audio_poll_timeout_seconds", 180) or 180
+        )
         sarvam_timeout = float(getattr(ws, "sarvam_timeout_seconds", 60) or 60)
 
     for name in names:
@@ -214,7 +221,12 @@ def _run_chain(
             continue
         provider = factory()
         if name == "fal":
-            effective_timeout = max(timeout, fal_poll + 30)
+            poll_budget = (
+                min(fal_audio_poll, fal_poll)
+                if kind in {"sfx", "music"}
+                else fal_poll
+            )
+            effective_timeout = max(timeout, poll_budget + 30)
         elif name == "sarvam":
             effective_timeout = max(timeout, sarvam_timeout + 15)
         else:
