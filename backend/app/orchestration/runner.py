@@ -35,6 +35,13 @@ async def _run_in_background(project_id: str, input_data: Any) -> None:
         _running_tasks.pop(project_id, None)
 
 
+def _cancel_running(project_id: str) -> None:
+    """Stop in-process production task so an explicit user retry can start."""
+    existing = _running_tasks.pop(project_id, None)
+    if existing is not None and not existing.done():
+        existing.cancel()
+
+
 def _schedule(project_id: str, input_data: Any) -> None:
     existing = _running_tasks.get(project_id)
     if existing and not existing.done():
@@ -185,11 +192,8 @@ async def regenerate_production(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Provide scene_ids and/or shot_ids",
         )
-    if _is_running(project_id):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Production already running for this project",
-        )
+    # Explicit user retry wins over a stuck/in-flight run.
+    _cancel_running(project_id)
 
     graph = _get_graph()
     config = thread_config(project_id)

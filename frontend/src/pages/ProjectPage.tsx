@@ -1,7 +1,8 @@
 import { ArrowLeft, RefreshCw } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Button } from '../components/Button'
+import { FilmStrip, type FilmFrame } from '../components/FilmStrip'
 import { ProgressBar, StatusBadge } from '../components/StatusBadge'
 import { EmptyState, ErrorState, Skeleton, Spinner } from '../components/States'
 import { useAsync } from '../hooks/useAsync'
@@ -20,16 +21,6 @@ import type { ProductionStage, Scene } from '../types'
 
 const POLL_MS = 2500
 
-interface ClipCard {
-  assetId: string
-  shotId: string
-  sceneId: string
-  sceneTitle: string
-  shotTitle: string
-  duration: number | null
-  url: string | null
-}
-
 export function ProjectPage() {
   const { id } = useParams<{ id: string }>()
   const projectId = id ?? ''
@@ -47,84 +38,147 @@ export function ProjectPage() {
     () => productionAsync.data?.scenes ?? [],
   )
   const [shots, setShots] = useState<
-    Array<{ id: string; sceneId: string; order: number; title: string; status: string }>
+    Array<{
+      id: string
+      sceneId: string
+      order: number
+      title: string
+      status: string
+    }>
   >([])
   const [workflowStatus, setWorkflowStatus] = useState<string>('pending')
   const [retryingKey, setRetryingKey] = useState<string | null>(null)
   const [retryError, setRetryError] = useState<string | null>(null)
   const [finalVideoUrl, setFinalVideoUrl] = useState<string | null>(null)
-  const [clips, setClips] = useState<ClipCard[]>([])
-  const [clipsLoading, setClipsLoading] = useState(false)
+  const [frames, setFrames] = useState<FilmFrame[]>([])
+  const [framesLoading, setFramesLoading] = useState(false)
 
-  const loadClips = useCallback(async () => {
+  const loadFilmstrip = useCallback(async () => {
     if (!projectId) {
       return
     }
-    setClipsLoading(true)
+    setFramesLoading(true)
     try {
       const [{ assets }, state] = await Promise.all([
         listProjectAssets(projectId),
         getProductionState(projectId),
       ])
-      setShots(
-        (state.raw.shots || []).map((s) => ({
-          id: s.id,
-          sceneId: s.sceneId,
-          order: s.order,
-          title: s.title,
-          status: s.status,
-        })),
-      )
-      const sceneTitle = new Map(
-        state.scenes.map((s) => [s.id, s.title] as const),
-      )
-      const shotMeta = new Map(
-        (state.raw.shots || []).map((s) => [s.id, s] as const),
-      )
+      const nextShots = (state.raw.shots || []).map((s) => ({
+        id: s.id,
+        sceneId: s.sceneId,
+        order: s.order,
+        title: s.title,
+        status: s.status,
+      }))
+      setShots(nextShots)
 
-      // Latest video asset per shot_id
-      const byShot = new Map<string, ProjectAsset>()
+      const sceneById = new Map(state.scenes.map((s) => [s.id, s] as const))
+      const shotById = new Map(nextShots.map((s) => [s.id, s] as const))
+
+      const latestImageByScene = new Map<string, ProjectAsset>()
+      const latestVideoByShot = new Map<string, ProjectAsset>()
       for (const asset of assets) {
-        if (asset.type !== 'video' || !asset.shotId) {
-          continue
+        if (asset.type === 'image' && asset.sceneId) {
+          latestImageByScene.set(asset.sceneId, asset)
         }
-        byShot.set(asset.shotId, asset)
+        if (asset.type === 'video' && asset.shotId) {
+          latestVideoByShot.set(asset.shotId, asset)
+        }
       }
 
-      const cards: ClipCard[] = []
-      for (const [shotId, asset] of byShot) {
-        const meta = shotMeta.get(shotId)
-        const sceneId = asset.sceneId || meta?.sceneId || ''
-        let url: string | null = null
+      const urlCache = new Map<string, string | null>()
+      const resolveUrl = async (assetId: string) => {
+        if (urlCache.has(assetId)) {
+          return urlCache.get(assetId) ?? null
+        }
         try {
-          const signed = await getAssetSignedUrl(projectId, asset.id)
-          url = signed.url
+          const signed = await getAssetSignedUrl(projectId, assetId)
+          urlCache.set(assetId, signed.url)
+          return signed.url
         } catch {
-          url = null
+          urlCache.set(assetId, null)
+          return null
         }
-        cards.push({
-          assetId: asset.id,
-          shotId,
-          sceneId,
-          sceneTitle: sceneTitle.get(sceneId) || sceneId || 'Scene',
-          shotTitle: meta?.title || shotId,
-          duration: asset.duration ?? null,
-          url,
-        })
       }
-      cards.sort((a, b) => {
-        const ao = shotMeta.get(a.shotId)?.order ?? 0
-        const bo = shotMeta.get(b.shotId)?.order ?? 0
-        if (a.sceneId !== b.sceneId) {
-          return a.sceneId.localeCompare(b.sceneId)
+
+      const nextFrames: FilmFrame[] = []
+      const orderedScenes = [...state.scenes].sort((a, b) => a.order - b.order)
+
+      for (const scene of orderedScenes) {
+        const image = latestImageByScene.get(scene.id)
+        if (image) {
+          nextFrames.push({
+            id: `image:${image.id}`,
+            kind: 'image',
+            label: scene.title,
+            sublabel: `Scene ${scene.order} · Still`,
+            url: await resolveUrl(image.id),
+            status: mapUiStatus(scene.status),
+            sceneId: scene.id,
+            retryKind: 'scene',
+            retryId: scene.id,
+          })
+        } else {
+          nextFrames.push({
+            id: `image-placeholder:${scene.id}`,
+            kind: 'image',
+            label: scene.title,
+            sublabel: `Scene ${scene.order} · Still pending`,
+            url: null,
+            status: mapUiStatus(scene.status),
+            sceneId: scene.id,
+            retryKind: 'scene',
+            retryId: scene.id,
+          })
         }
-        return ao - bo
-      })
-      setClips(cards)
+
+        const sceneShots = nextShots
+          .filter((s) => s.sceneId === scene.id)
+          .sort((a, b) => a.order - b.order)
+        for (const shot of sceneShots) {
+          const video = latestVideoByShot.get(shot.id)
+          nextFrames.push({
+            id: video ? `video:${video.id}` : `video-placeholder:${shot.id}`,
+            kind: 'video',
+            label: shot.title || `Shot ${shot.order}`,
+            sublabel: `${sceneById.get(scene.id)?.title || scene.title} · Clip`,
+            url: video ? await resolveUrl(video.id) : null,
+            status: mapUiStatus(shot.status),
+            sceneId: scene.id,
+            shotId: shot.id,
+            retryKind: 'shot',
+            retryId: shot.id,
+          })
+        }
+
+        // If shots list empty but we somehow have orphan videos for scene
+        if (sceneShots.length === 0) {
+          for (const [shotId, video] of latestVideoByShot) {
+            if (video.sceneId !== scene.id) {
+              continue
+            }
+            const meta = shotById.get(shotId)
+            nextFrames.push({
+              id: `video:${video.id}`,
+              kind: 'video',
+              label: meta?.title || shotId,
+              sublabel: `${scene.title} · Clip`,
+              url: await resolveUrl(video.id),
+              status: mapUiStatus(meta?.status || 'completed'),
+              sceneId: scene.id,
+              shotId,
+              retryKind: 'shot',
+              retryId: shotId,
+            })
+          }
+        }
+      }
+
+      setFrames(nextFrames)
     } catch {
-      // Keep last known clips.
+      // Keep last frames.
     } finally {
-      setClipsLoading(false)
+      setFramesLoading(false)
     }
   }, [projectId])
 
@@ -163,10 +217,10 @@ export function ProjectPage() {
     if (!projectId) {
       return
     }
-    void loadClips()
-  }, [projectId, loadClips, workflowStatus])
+    void loadFilmstrip()
+  }, [projectId, loadFilmstrip, workflowStatus])
 
-  // Poll real production status every 2–3s until finished.
+  // Poll production + filmstrip while running so stills/clips appear live.
   useEffect(() => {
     if (!projectId) {
       return
@@ -192,69 +246,46 @@ export function ProjectPage() {
               status: s.status,
             })),
           )
-          if (data.raw.status === 'completed') {
-            void loadClips()
-          }
         })
-        .catch(() => {
-          // Keep last known UI state; next poll retries.
-        })
+        .catch(() => undefined)
+      void loadFilmstrip()
     }, POLL_MS)
 
     return () => window.clearInterval(timer)
-  }, [projectId, workflowStatus, loadClips])
+  }, [projectId, workflowStatus, loadFilmstrip])
 
-  const isBusy = useMemo(
-    () =>
-      workflowStatus === 'running' ||
-      workflowStatus === 'paused' ||
-      Boolean(retryingKey),
-    [workflowStatus, retryingKey],
-  )
-
-  const onRetry = async (kind: 'stage' | 'scene', itemId: string) => {
+  const onRetryFailed = async (kind: 'stage' | 'scene', itemId: string) => {
     setRetryingKey(`${kind}:${itemId}`)
     setRetryError(null)
     try {
       const result = await retryFailedItem(projectId, kind, itemId)
       setStages(result.stages)
       setScenes(result.scenes)
+      setWorkflowStatus('running')
       await productionAsync.reload()
+      void loadFilmstrip()
     } catch (error) {
-      setRetryError(
-        error instanceof Error ? error.message : 'Retry failed.',
-      )
+      setRetryError(error instanceof Error ? error.message : 'Retry failed.')
     } finally {
       setRetryingKey(null)
     }
   }
 
-  const onRegenerateShot = async (shotId: string) => {
-    setRetryingKey(`shot:${shotId}`)
+  const onFilmRetry = async (kind: 'scene' | 'shot', id: string) => {
+    setRetryingKey(`${kind}:${id}`)
     setRetryError(null)
     try {
-      await regenerateProduction(projectId, { shotIds: [shotId] })
+      if (kind === 'scene') {
+        await regenerateProduction(projectId, { sceneIds: [id] })
+      } else {
+        await regenerateProduction(projectId, { shotIds: [id] })
+      }
       setWorkflowStatus('running')
       await productionAsync.reload()
+      void loadFilmstrip()
     } catch (error) {
       setRetryError(
-        error instanceof Error ? error.message : 'Clip regenerate failed.',
-      )
-    } finally {
-      setRetryingKey(null)
-    }
-  }
-
-  const onRegenerateScene = async (sceneId: string) => {
-    setRetryingKey(`scene-regen:${sceneId}`)
-    setRetryError(null)
-    try {
-      await regenerateProduction(projectId, { sceneIds: [sceneId] })
-      setWorkflowStatus('running')
-      await productionAsync.reload()
-    } catch (error) {
-      setRetryError(
-        error instanceof Error ? error.message : 'Scene regenerate failed.',
+        error instanceof Error ? error.message : 'Regenerate failed.',
       )
     } finally {
       setRetryingKey(null)
@@ -370,6 +401,32 @@ export function ProjectPage() {
         <ErrorState message={retryError} onRetry={() => setRetryError(null)} />
       ) : null}
 
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 className="section-title">Storyboard & clips</h2>
+            <p className="meta-text mt-1">
+              Left → right film strip. Hover to enlarge, click for full preview, Retry to regenerate.
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            loading={framesLoading}
+            onClick={() => void loadFilmstrip()}
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            Refresh
+          </Button>
+        </div>
+        <FilmStrip
+          frames={frames}
+          loading={framesLoading}
+          retryingKey={retryingKey}
+          onRetry={(kind, id) => void onFilmRetry(kind, id)}
+        />
+      </section>
+
       {finalVideoUrl ? (
         <section className="anim-fade space-y-3">
           <h2 className="section-title">Final video</h2>
@@ -392,94 +449,6 @@ export function ProjectPage() {
       ) : null}
 
       <section className="space-y-4">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <h2 className="section-title">Clips</h2>
-            <p className="meta-text mt-1">
-              Preview each shot clip. Retry regenerates that clip and rebuilds the final cut.
-            </p>
-          </div>
-          <Button
-            size="sm"
-            variant="secondary"
-            loading={clipsLoading}
-            onClick={() => void loadClips()}
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            Refresh clips
-          </Button>
-        </div>
-        {clipsLoading && clips.length === 0 ? (
-          <Spinner label="Loading clips…" />
-        ) : clips.length === 0 ? (
-          <EmptyState
-            title="No clips yet"
-            description="Shot videos appear here once video generation finishes."
-          />
-        ) : (
-          <ul className="grid gap-4 sm:grid-cols-2">
-            {clips.map((clip) => {
-              const shotStatus =
-                shots.find((s) => s.id === clip.shotId)?.status || 'completed'
-              return (
-                <li
-                  key={clip.assetId}
-                  className="overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)]"
-                >
-                  <div className="bg-black">
-                    {clip.url ? (
-                      <video
-                        className="aspect-video w-full"
-                        src={clip.url}
-                        controls
-                        playsInline
-                        preload="metadata"
-                      />
-                    ) : (
-                      <div className="flex aspect-video items-center justify-center text-sm text-[var(--color-ink-muted)]">
-                        Preview unavailable
-                      </div>
-                    )}
-                  </div>
-                  <div className="space-y-3 p-4">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="text-sm font-semibold">{clip.shotTitle}</h3>
-                      <StatusBadge
-                        status={
-                          shotStatus === 'failed'
-                            ? 'failed'
-                            : shotStatus === 'running' || shotStatus === 'pending'
-                              ? mapClipStatus(shotStatus, isBusy)
-                              : 'completed'
-                        }
-                      />
-                    </div>
-                    <p className="meta-text">
-                      {clip.sceneTitle}
-                      {clip.duration != null
-                        ? ` · ${formatDuration(Math.round(clip.duration))}`
-                        : ''}
-                    </p>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      className="w-full"
-                      disabled={isBusy}
-                      loading={retryingKey === `shot:${clip.shotId}`}
-                      onClick={() => void onRegenerateShot(clip.shotId)}
-                    >
-                      <RefreshCw className="h-3.5 w-3.5" />
-                      Retry clip
-                    </Button>
-                  </div>
-                </li>
-              )
-            })}
-          </ul>
-        )}
-      </section>
-
-      <section className="space-y-4">
         <h2 className="section-title">Production pipeline</h2>
         <div className="overflow-x-auto pb-2">
           <ol className="flex min-w-max gap-3">
@@ -497,16 +466,14 @@ export function ProjectPage() {
                   <StatusBadge status={stage.status} />
                 </div>
                 <ProgressBar value={stage.progress} status={stage.status} />
-                <p className="meta-text mt-2">
-                  {stage.progress}%
-                </p>
+                <p className="meta-text mt-2">{stage.progress}%</p>
                 {stage.status === 'failed' ? (
                   <Button
                     className="mt-3 w-full"
                     size="sm"
                     variant="secondary"
                     loading={retryingKey === `stage:${stage.id}`}
-                    onClick={() => void onRetry('stage', stage.id)}
+                    onClick={() => void onRetryFailed('stage', stage.id)}
                   >
                     <RefreshCw className="h-3.5 w-3.5" />
                     Retry
@@ -527,52 +494,58 @@ export function ProjectPage() {
           />
         ) : (
           <ul className="space-y-3">
-            {scenes.map((scene) => (
-              <li
-                key={scene.id}
-                className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] p-4"
-              >
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <div className="mb-1 flex flex-wrap items-center gap-2">
-                      <h3 className="font-medium">
-                        Scene {scene.order}: {scene.title}
-                      </h3>
-                      <StatusBadge status={scene.status} />
+            {scenes.map((scene) => {
+              const sceneShots = shots.filter((s) => s.sceneId === scene.id)
+              const hasFailedShot = sceneShots.some((s) => s.status === 'failed')
+              return (
+                <li
+                  key={scene.id}
+                  className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] p-4"
+                >
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <div className="mb-1 flex flex-wrap items-center gap-2">
+                        <h3 className="font-medium">
+                          Scene {scene.order}: {scene.title}
+                        </h3>
+                        <StatusBadge status={scene.status} />
+                      </div>
+                      <p className="text-sm text-[var(--color-ink-muted)]">
+                        {scene.description}
+                      </p>
+                      <p className="meta-text mt-2">
+                        {formatDuration(scene.durationSeconds)}
+                        {sceneShots.length
+                          ? ` · ${sceneShots.length} shot${sceneShots.length === 1 ? '' : 's'}`
+                          : ''}
+                      </p>
                     </div>
-                    <p className="text-sm text-[var(--color-ink-muted)]">
-                      {scene.description}
-                    </p>
-                    <p className="meta-text mt-2">
-                      {formatDuration(scene.durationSeconds)}
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 flex-col gap-2 sm:items-end">
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      disabled={isBusy}
-                      loading={retryingKey === `scene-regen:${scene.id}`}
-                      onClick={() => void onRegenerateScene(scene.id)}
-                    >
-                      <RefreshCw className="h-3.5 w-3.5" />
-                      Retry scene
-                    </Button>
-                    {scene.status === 'failed' ? (
+                    <div className="flex shrink-0 flex-col gap-2 sm:items-end">
                       <Button
                         size="sm"
                         variant="secondary"
                         loading={retryingKey === `scene:${scene.id}`}
-                        onClick={() => void onRetry('scene', scene.id)}
+                        onClick={() => void onFilmRetry('scene', scene.id)}
                       >
                         <RefreshCw className="h-3.5 w-3.5" />
-                        Resume failed
+                        Retry scene
                       </Button>
-                    ) : null}
+                      {(scene.status === 'failed' || hasFailedShot) && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          loading={retryingKey === `resume:${scene.id}`}
+                          onClick={() => void onRetryFailed('scene', scene.id)}
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" />
+                          Resume failed
+                        </Button>
+                      )}
+                    </div>
                   </div>
-                </div>
-              </li>
-            ))}
+                </li>
+              )
+            })}
           </ul>
         )}
       </section>
@@ -580,18 +553,14 @@ export function ProjectPage() {
   )
 }
 
-function mapClipStatus(
-  shotStatus: string,
-  busy: boolean,
+function mapUiStatus(
+  value: string | undefined,
 ): 'pending' | 'running' | 'completed' | 'failed' {
-  if (shotStatus === 'failed') {
-    return 'failed'
+  if (value === 'completed' || value === 'failed' || value === 'running') {
+    return value
   }
-  if (shotStatus === 'running' || (busy && shotStatus === 'pending')) {
+  if (value === 'paused' || value === 'retrying') {
     return 'running'
-  }
-  if (shotStatus === 'completed') {
-    return 'completed'
   }
   return 'pending'
 }
